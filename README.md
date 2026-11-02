@@ -22,7 +22,7 @@ GitHub Actions publishes packages for the following targets:
    - Linux: `./start.sh`
    - Windows: `start.bat`
    - Termux: `./start.sh` from the Android/Termux package.
-2. Open `http://127.0.0.1:8080/`. The root path redirects to the administration panel.
+2. Open `http://127.0.0.1:6687/`. The root path redirects to the administration panel.
 3. On first access, set a 6-20 character panel token.
 
 Add upstream accounts and adjust runtime settings from the panel. The generated configuration file keeps credentials on disk but never exposes them in the UI.

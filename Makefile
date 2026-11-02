@@ -6,7 +6,7 @@ BIN      := $(BIN_DIR)/$(APP)
 
 # 默认配置文件，可被环境变量覆盖
 CONFIG   ?= config.toml
-ADDR     ?= :8080
+ADDR     ?= 0.0.0.0:6687
 
 .PHONY: all build run tidy vet fmt clean help
 
