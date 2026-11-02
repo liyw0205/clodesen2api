@@ -1,0 +1,11 @@
+/config.toml
+/config.toml.bak
+/run.log
+/run.pid
+/data/
+/bin/
+/.build-test/
+/.package-stage-*/
+/.packaged-bin.*
+/clodesen2api-*.tar.gz
+/clodesen2api-*.zip

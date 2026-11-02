@@ -1,0 +1,52 @@
+# clodesen2api 配置示例
+# 拷贝为 config.toml 后按需修改，或用 -c config.toml 指定
+# 命令行参数优先级高于配置文件：clodesen2api -c config.toml -addr :9090
+
+[server]
+# 本地监听地址
+addr = ":8080"
+
+[upstream]
+# 上游站点基础地址，供登录和签到使用
+base_url = "https://pai.zaiduyu.top"
+# 上游 OpenAI API 基础地址；网关会自行追加 /v1/... 路由
+openai_base_url = "https://pai.zaiduyu.top/api/openai"
+# 登录端点路径
+login_path = "/api/user-auth"
+# 登录请求超时（Go duration 字符串）
+login_timeout = "30s"
+# 上游请求超时（0 表示不限，流式场景建议设大一点或为 0）
+request_timeout = "0s"
+# 浏览器 UA，缺失上游会被 Cloudflare/WAF 拒绝
+user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+[auth]
+# 多账号优先使用此列表；用逗号分隔，格式为 identifier:password
+accounts = ""
+# 请求选账号策略：round_robin（轮询）或 random（随机）
+strategy = "round_robin"
+# 单账号兼容配置；accounts 非空时忽略以下两项
+identifier = ""
+password = ""
+# 401 后是否自动重新登录
+auto_relogin = true
+
+[admin]
+# 管理后台令牌；留空时可从前端首次设置 6-20 位令牌。
+token = ""
+# 首次可从管理前端设置令牌；令牌会保存到此文件并在重启后自动加载。
+token_file = "data/admin.token"
+# 后台维护的多账号数据文件，权限会限制为仅当前用户可读写。
+accounts_file = "data/accounts.json"
+
+# 多账号配置示例：
+# accounts = "user1@example.com:password1,user2@example.com:password2"
+
+# 每日签到（GET /api/checkin）
+[checkin]
+enable = true
+path = "/api/checkin"
+# 每天签到时刻（HH:MM，24h）
+at = "04:00"
+# 签到时区
+timezone = "Asia/Shanghai"

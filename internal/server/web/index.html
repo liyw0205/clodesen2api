@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f7f5">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="description" content="Clodesen 账号与积分管理">
+    <title>账号管理 · Clodesen</title>
+    <link rel="stylesheet" href="/admin/app.css">
+    <script defer src="/admin/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <section id="login-panel" class="auth-shell" hidden>
+      <div class="auth-brand"><span class="brand-mark" aria-hidden="true">C</span><span>Clodesen</span></div>
+      <main class="auth-main">
+        <p class="eyebrow">管理控制台</p>
+        <h1 id="login-title">登录</h1>
+        <form id="login-form" class="form-stack">
+          <label for="admin-token">管理令牌</label>
+          <input id="admin-token" name="token" type="password" autocomplete="current-password" required>
+          <div id="admin-token-confirm-wrap" hidden>
+            <label for="admin-token-confirm">确认管理令牌</label>
+            <input id="admin-token-confirm" name="confirm" type="password" autocomplete="new-password" minlength="6" maxlength="20">
+          </div>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button id="login-submit" class="button button-primary" type="submit">登录管理后台</button>
+        </form>
+        <p id="setup-message" class="setup-message" hidden>首次使用请设置一个 6-20 位的管理令牌，保存后即可进入后台。</p>
+      </main>
+    </section>
+
+    <div id="dashboard" class="app-shell" hidden>
+      <header class="topbar">
+        <a class="brand" href="/admin/" aria-label="Clodesen 账号管理首页">
+          <span class="brand-mark" aria-hidden="true">C</span>
+          <span class="brand-name">Clodesen</span>
+          <span class="brand-divider" aria-hidden="true"></span>
+          <span class="brand-section">账号管理</span>
+        </a>
+        <div class="topbar-actions">
+          <span id="service-state" class="service-state"><i aria-hidden="true"></i><span>连接中</span></span>
+          <button id="logout-button" class="button button-quiet" type="button">退出</button>
+        </div>
+      </header>
+
+      <main id="main-content" class="main-content">
+        <div class="main-tabs" role="tablist" aria-label="管理视图">
+          <button class="main-tab" id="accounts-tab" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="accounts-view" data-view="accounts">账号与积分</button>
+          <button class="main-tab" id="models-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="analytics-view" data-view="analytics">模型与统计</button>
+        </div>
+        <div id="accounts-view" role="tabpanel" aria-labelledby="accounts-tab">
+        <section class="page-heading">
+          <div>
+            <p class="eyebrow">账号池</p>
+            <h1>账号与积分</h1>
+          </div>
+          <div class="heading-actions">
+            <div class="strategy-control" role="group" aria-label="账号选择策略">
+              <button type="button" data-strategy="round_robin" aria-pressed="true">轮询</button>
+              <button type="button" data-strategy="random" aria-pressed="false">随机</button>
+            </div>
+            <button id="refresh-button" class="button button-secondary" type="button">刷新积分</button>
+          </div>
+        </section>
+
+        <section class="summary-strip" aria-label="账号池摘要">
+          <div class="summary-primary">
+            <span class="summary-label">可用积分合计</span>
+            <strong id="available-credits" class="summary-value">--</strong>
+          </div>
+          <div class="summary-stat">
+            <span class="summary-label">启用账号</span>
+            <strong id="enabled-count">--</strong>
+          </div>
+          <div class="summary-stat">
+            <span class="summary-label">冷却中</span>
+            <strong id="cooldown-count">--</strong>
+          </div>
+          <div class="summary-stat summary-update">
+            <span class="summary-label">最近刷新</span>
+            <strong id="last-updated">尚未刷新</strong>
+          </div>
+          <div class="summary-actions">
+            <button id="redeem-open" class="button button-primary" type="button">使用兑换码</button>
+            <button id="account-open" class="button button-secondary" type="button">添加账号</button>
+          </div>
+        </section>
+
+        <section class="accounts-section" aria-labelledby="accounts-title">
+          <div class="section-heading">
+            <div>
+              <h2 id="accounts-title">上游账号</h2>
+              <p id="account-count-label" class="muted">正在读取账号</p>
+            </div>
+            <label class="select-all-control"><input id="select-all" type="checkbox"><span>选择全部启用账号</span></label>
+          </div>
+          <div id="loading-state" class="loading-state" aria-label="正在加载账号">
+            <span></span><span></span><span></span>
+          </div>
+          <div id="error-state" class="inline-error" role="alert" hidden></div>
+          <div id="empty-state" class="empty-state" hidden>
+            <span class="empty-mark" aria-hidden="true">+</span>
+            <strong>还没有账号</strong>
+            <button id="empty-add" class="text-button" type="button">添加第一个账号</button>
+          </div>
+          <div id="account-table-wrap" class="table-wrap" hidden>
+            <table class="account-table">
+              <thead>
+                <tr>
+                  <th class="select-col"><span class="sr-only">选择账号</span></th>
+                  <th>账号</th>
+                  <th>积分余额</th>
+                  <th>兑换额度</th>
+                  <th>状态</th>
+                  <th>签到</th>
+                  <th class="actions-col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="account-rows"></tbody>
+            </table>
+          </div>
+          <div id="account-cards" class="account-cards" hidden></div>
+          <p id="balance-note" class="balance-note" hidden>部分账号的余额暂时无法读取，合计仅包含已成功读取的启用账号。</p>
+        </section>
+        </div>
+
+        <section id="analytics-view" class="analytics-view" role="tabpanel" aria-labelledby="models-tab" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">模型</p><h1>模型与调用统计</h1></div>
+            <button id="analytics-refresh" class="button button-secondary" type="button">刷新数据</button>
+          </div>
+
+          <section class="analytics-summary" aria-label="调用摘要">
+            <div class="summary-stat"><span class="summary-label">总请求</span><strong id="usage-total">--</strong></div>
+            <div class="summary-stat"><span class="summary-label">成功</span><strong id="usage-successes">--</strong></div>
+            <div class="summary-stat"><span class="summary-label">失败</span><strong id="usage-failures">--</strong></div>
+            <div class="summary-stat"><span class="summary-label">成功率</span><strong id="usage-success-rate">--</strong></div>
+            <div class="summary-stat"><span class="summary-label">平均耗时</span><strong id="usage-latency">--</strong></div>
+            <p id="usage-period" class="analytics-period">进程启动以来</p>
+          </section>
+
+          <section class="analytics-section" aria-labelledby="models-title">
+            <div class="section-heading">
+              <div><h2 id="models-title">可用模型</h2><p id="model-count" class="muted">尚未读取</p></div>
+            </div>
+            <div id="model-error" class="inline-error" role="alert" hidden></div>
+            <div id="model-empty" class="empty-state" hidden><strong>没有可显示的模型</strong></div>
+            <div id="model-table-wrap" class="table-wrap" hidden>
+              <table class="account-table model-table">
+                <thead><tr><th>模型 ID</th><th>积分</th><th>提供方</th><th>创建时间</th></tr></thead>
+                <tbody id="model-rows"></tbody>
+              </table>
+            </div>
+            <div id="model-cards" class="model-cards" hidden></div>
+          </section>
+
+          <section class="analytics-section" aria-labelledby="credit-usage-title">
+            <div class="section-heading">
+              <div><h2 id="credit-usage-title">积分使用记录</h2><p id="credit-usage-count" class="muted">尚未读取</p></div>
+              <span class="muted">本地实时记录 · 上游 12 小时校准</span>
+            </div>
+            <div id="credit-usage-error" class="inline-error" role="alert" hidden></div>
+            <div id="credit-usage-empty" class="empty-state" hidden><strong>还没有积分使用记录</strong></div>
+            <div id="credit-usage-table-wrap" class="table-wrap" hidden>
+              <table class="account-table credit-usage-table">
+                <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>积分变动</th><th>余额</th><th>来源</th><th>状态</th></tr></thead>
+                <tbody id="credit-usage-rows"></tbody>
+              </table>
+            </div>
+            <div id="credit-usage-cards" class="credit-usage-cards" hidden></div>
+          </section>
+
+          <section class="analytics-section" aria-labelledby="usage-title">
+            <div class="section-heading">
+              <div><h2 id="usage-title">按模型统计</h2><p class="muted">记录请求数、结果与平均耗时</p></div>
+              <label class="usage-filter" for="usage-model-filter"><span>模型</span><select id="usage-model-filter"><option value="">全部模型</option></select></label>
+            </div>
+            <div id="usage-error" class="inline-error" role="alert" hidden></div>
+            <div id="usage-empty" class="empty-state" hidden><strong>还没有 API 调用记录</strong></div>
+            <div id="usage-table-wrap" class="table-wrap" hidden>
+              <table class="account-table usage-table">
+                <thead><tr><th>模型</th><th>请求</th><th>成功</th><th>失败</th><th>平均耗时</th><th>最近使用</th></tr></thead>
+                <tbody id="usage-rows"></tbody>
+              </table>
+            </div>
+            <div id="usage-cards" class="usage-cards" hidden></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="account-dialog" class="dialog-shell">
+      <form id="account-form" class="dialog-content">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">账号池</p><h2 id="account-dialog-title">添加账号</h2></div>
+          <button class="icon-button" type="button" data-close="account-dialog" aria-label="关闭">×</button>
+        </div>
+        <input id="account-id" type="hidden">
+        <label for="account-identifier">账号标识</label>
+        <input id="account-identifier" type="text" autocomplete="username" autocapitalize="none" required>
+        <label for="account-password">密码</label>
+        <input id="account-password" type="password" autocomplete="new-password">
+        <p id="account-form-note" class="field-note">密码只在添加账号时需要填写。</p>
+        <p id="account-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close="account-dialog">取消</button>
+          <button class="button button-primary" type="submit">保存账号</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="redeem-dialog" class="dialog-shell">
+      <form id="redeem-form" class="dialog-content">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">限时兑换</p><h2>使用兑换码</h2></div>
+          <button class="icon-button" type="button" data-close="redeem-dialog" aria-label="关闭">×</button>
+        </div>
+        <label for="redemption-code">兑换码</label>
+        <input id="redemption-code" type="text" maxlength="64" autocomplete="off" required>
+        <div class="target-heading"><strong>兑换账号</strong><button id="select-enabled" class="text-button" type="button">全选启用账号</button></div>
+        <div id="redeem-targets" class="redeem-targets"></div>
+        <p id="redeem-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close="redeem-dialog">取消</button>
+          <button id="redeem-submit" class="button button-primary" type="submit">开始兑换</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="dialog-shell dialog-compact">
+      <div class="dialog-content">
+        <div class="dialog-heading"><div><p class="eyebrow">账号池</p><h2>移除账号</h2></div><button class="icon-button" type="button" data-close="confirm-dialog" aria-label="关闭">×</button></div>
+        <p id="confirm-copy" class="confirm-copy"></p>
+        <div class="dialog-actions">
+          <button class="button button-secondary" type="button" data-close="confirm-dialog">取消</button>
+          <button id="confirm-delete" class="button button-danger" type="button">移除</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="result-dialog" class="dialog-shell">
+      <div class="dialog-content">
+        <div class="dialog-heading"><div><p class="eyebrow">兑换结果</p><h2 id="result-title">兑换完成</h2></div><button class="icon-button" type="button" data-close="result-dialog" aria-label="关闭">×</button></div>
+        <p id="result-summary" class="result-summary"></p>
+        <ul id="result-list" class="result-list"></ul>
+        <div class="dialog-actions"><button class="button button-primary" type="button" data-close="result-dialog">完成</button></div>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
