@@ -170,7 +170,7 @@ func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
 		item := map[string]any{
 			"id": record.ID, "accountId": record.AccountID,
 			"account": maskIdentifier(record.Identifier), "model": record.Model,
-			"amount": record.Amount, "balanceAfter": nil,
+			"amount": record.Amount, "direction": creditDirection(record.Amount), "balanceAfter": nil,
 			"type": record.Type, "description": record.Description,
 			"status": record.Status, "createdAt": record.CreatedAt, "source": record.Source,
 		}
@@ -180,6 +180,17 @@ func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"records": items, "modelStats": creditModelStats(records), "refreshedAt": time.Now()})
+}
+
+func creditDirection(amount int64) string {
+	switch {
+	case amount > 0:
+		return "increase"
+	case amount < 0:
+		return "decrease"
+	default:
+		return "unchanged"
+	}
 }
 
 func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {

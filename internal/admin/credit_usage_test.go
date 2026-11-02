@@ -28,3 +28,18 @@ func TestMergeCreditRecordsCalibratesLocalAndKeepsSevenDays(t *testing.T) {
 		t.Fatalf("merged records = %+v", merged)
 	}
 }
+
+func TestCreditDirection(t *testing.T) {
+	for _, test := range []struct {
+		amount int64
+		want   string
+	}{
+		{amount: 100, want: "increase"},
+		{amount: -60, want: "decrease"},
+		{amount: 0, want: "unchanged"},
+	} {
+		if got := creditDirection(test.amount); got != test.want {
+			t.Errorf("creditDirection(%d) = %q, want %q", test.amount, got, test.want)
+		}
+	}
+}

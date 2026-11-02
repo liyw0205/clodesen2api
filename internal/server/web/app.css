@@ -107,6 +107,7 @@ input::placeholder { color: #829087; }
 .model-credits, .credit-positive, .credit-negative { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .credit-positive { color: var(--green); font-weight: 600; }
 .credit-negative { color: var(--red); font-weight: 600; }
+.credit-neutral { color: var(--muted); font-weight: 600; }
 .model-table .model-id, .usage-table .model-id { min-width: 180px; }
 .model-cards, .usage-cards, .credit-usage-cards { display: none; }
 .usage-table td:nth-child(n+2):nth-child(-n+5) { font-variant-numeric: tabular-nums; white-space: nowrap; }

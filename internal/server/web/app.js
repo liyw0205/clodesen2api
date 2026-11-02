@@ -150,6 +150,18 @@
     return (amount > 0 ? "+" : "") + formatNumber(amount);
   }
 
+  function creditDirection(record) {
+    if (record.direction === "increase") return "增加";
+    if (record.direction === "decrease") return "减少";
+    if (record.direction === "unchanged") return "无变化";
+    if (!hasNumber(record.amount) || Number(record.amount) === 0) return "无变化";
+    return Number(record.amount) > 0 ? "增加" : "减少";
+  }
+
+  function creditAmountText(record) {
+    return creditDirection(record) + " " + creditAmount(record.amount) + " 积分";
+  }
+
   function creditRecordStatus(record) {
     if (record.type === "refund") return "已退回";
     if (record.status === "completed") return "已完成";
@@ -264,18 +276,19 @@
     $("#credit-usage-table-wrap").hidden = records.length === 0;
     $("#credit-usage-cards").hidden = records.length === 0;
     for (const record of records) {
-      const amountClass = hasNumber(record.amount) && Number(record.amount) >= 0 ? "credit-positive" : "credit-negative";
+      const amount = hasNumber(record.amount) ? Number(record.amount) : 0;
+      const amountClass = amount > 0 ? "credit-positive" : amount < 0 ? "credit-negative" : "credit-neutral";
       const row = element("tr");
       row.append(element("td", "", formatTime(record.createdAt)),
         element("td", "", record.account || "--"), element("td", "model-id", record.model || "--"),
-        element("td", amountClass, creditAmount(record.amount) + " 积分"),
+        element("td", amountClass, creditAmountText(record)),
         element("td", "", hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--"),
         element("td", "", creditRecordSource(record)), element("td", "", creditRecordStatus(record)));
       rows.append(row);
 
       const card = element("article", "credit-usage-card");
       const top = element("div", "credit-usage-card-top");
-      top.append(element("strong", "model-id", record.model || "--"), element("span", amountClass, creditAmount(record.amount) + " 积分"));
+      top.append(element("strong", "model-id", record.model || "--"), element("span", amountClass, creditAmountText(record)));
       const details = element("div", "credit-usage-card-details");
       details.append(element("span", "", record.account || "--"), element("span", "", "余额 " + (hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--")), element("span", "", creditRecordSource(record)), element("span", "", creditRecordStatus(record)), element("span", "", formatTime(record.createdAt)));
       card.append(top, details);
