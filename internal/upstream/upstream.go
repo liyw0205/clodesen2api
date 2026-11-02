@@ -42,6 +42,7 @@ type Upstream struct {
 	enabled     bool
 
 	accounts       []*Upstream
+	poolMode       bool
 	strategy       string
 	poolMu         sync.Mutex
 	nextAccount    int
@@ -60,6 +61,9 @@ func New(cfg *config.Config) (*Upstream, error) {
 	credentials, err := configuredAccounts(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if len(credentials) == 0 {
+		return newSession(cfg)
 	}
 	accounts := make([]AccountCredential, 0, len(credentials))
 	for _, credential := range credentials {
@@ -110,7 +114,7 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 	}
 
 	pool := &Upstream{
-		cfg:           cfg,
+		cfg: cfg, poolMode: true,
 		strategy:      strategy,
 		cooldownUntil: make(map[*Upstream]time.Time),
 		creditPricing: make(map[string]int64),
@@ -133,10 +137,37 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 		account.creditPricing = make(map[string]int64)
 		pool.accounts = append(pool.accounts, account)
 	}
-	if len(pool.accounts) == 0 {
-		return nil, errors.New("at least one upstream account is required")
-	}
 	return pool, nil
+}
+
+// ApplyRuntimeConfig updates settings changed from the management panel while
+// preserving existing cookies and account credentials.
+func (u *Upstream) ApplyRuntimeConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	u.mu.Lock()
+	u.cfg.Server = cfg.Server
+	u.cfg.Upstream = cfg.Upstream
+	u.cfg.Auth.Strategy = cfg.Auth.Strategy
+	u.cfg.Auth.AutoRelogin = cfg.Auth.AutoRelogin
+	u.cfg.Checkin = cfg.Checkin
+	u.mu.Unlock()
+	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
+	if strategy == "round_robin" || strategy == "random" {
+		u.poolMu.Lock()
+		u.strategy = strategy
+		u.poolMu.Unlock()
+	}
+	accounts := u.accountsSnapshot()
+	for _, account := range accounts {
+		account.mu.Lock()
+		account.cfg.Server = cfg.Server
+		account.cfg.Upstream = cfg.Upstream
+		account.cfg.Auth.AutoRelogin = cfg.Auth.AutoRelogin
+		account.cfg.Checkin = cfg.Checkin
+		account.mu.Unlock()
+	}
 }
 
 // SetCreditUsageRecorder receives successful model requests as local,
@@ -197,6 +228,9 @@ type accountCredential struct {
 func configuredAccounts(cfg *config.Config) ([]accountCredential, error) {
 	if strings.TrimSpace(cfg.Auth.Accounts) == "" {
 		identifier := strings.TrimSpace(cfg.Auth.Identifier)
+		if identifier == "" && strings.TrimSpace(cfg.Auth.Password) == "" {
+			return nil, nil
+		}
 		return []accountCredential{{identifier: identifier, password: cfg.Auth.Password}}, nil
 	}
 
@@ -254,7 +288,10 @@ func (u *Upstream) AccountCount() int {
 	if len(u.accounts) > 0 {
 		return len(u.accounts)
 	}
-	return 1
+	if !u.poolMode {
+		return 1
+	}
+	return 0
 }
 
 func (u *Upstream) accountsSnapshot() []*Upstream {
@@ -321,6 +358,9 @@ func (u *Upstream) Login(ctx context.Context) error {
 			return errors.New("all upstream accounts are disabled")
 		}
 		return errors.Join(loginErrors...)
+	}
+	if u.poolMode && (strings.TrimSpace(u.cfg.Auth.Identifier) == "" || strings.TrimSpace(u.cfg.Auth.Password) == "") {
+		return errors.New("未配置上游账号")
 	}
 
 	u.mu.Lock()
@@ -487,6 +527,9 @@ func isImageRequest(path string) bool {
 // 第二个返回值 wrote 表示响应头是否已经写给客户端（用于错误处理）。
 func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request openai.Request) (error, bool) {
 	if len(u.accountsSnapshot()) == 0 {
+		if u.poolMode {
+			return &NoAccountAvailableError{}, false
+		}
 		err, wrote, insufficient := u.forwardSingle(ctx, w, request)
 		if insufficient != nil {
 			insufficient.writeTo(w)

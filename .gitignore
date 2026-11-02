@@ -8,5 +8,4 @@
 /.package-stage-*/
 /.packaged-bin.*
 /.github-artifacts/
-/clodesen2api-*.tar.gz
 /clodesen2api-*.zip

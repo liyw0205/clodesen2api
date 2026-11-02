@@ -39,11 +39,6 @@ if [[ ! -x "$BINARY_PATH" ]]; then
     printf 'binary is missing or not executable: %s\n' "$BINARY_PATH" >&2
     exit 1
 fi
-if [[ ! -f "$CONFIG_PATH" ]]; then
-    printf 'config file is missing: %s\n' "$CONFIG_PATH" >&2
-    exit 1
-fi
-
 cd "$PROJECT_DIR"
 
 declare -a existing_pids=()

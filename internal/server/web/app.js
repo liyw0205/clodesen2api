@@ -156,14 +156,56 @@
 
   function selectView(view) {
     const analytics = view === "analytics";
-    $("#accounts-view").hidden = analytics;
+    const settings = view === "settings";
+    $("#accounts-view").hidden = analytics || settings;
     $("#analytics-view").hidden = !analytics;
+    $("#settings-view").hidden = !settings;
     document.querySelectorAll("[data-view]").forEach(button => {
       const selected = button.dataset.view === view;
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
     });
     if (analytics && !state.analyticsLoaded) loadAnalytics();
+    if (settings) loadSettings();
+  }
+
+  function setSettingsForm(settings) {
+    $("#settings-server-addr").value = settings.server?.addr || "";
+    $("#settings-base-url").value = settings.upstream?.baseURL || "";
+    $("#settings-openai-url").value = settings.upstream?.openAIBaseURL || "";
+    $("#settings-login-path").value = settings.upstream?.loginPath || "";
+    $("#settings-login-timeout").value = settings.upstream?.loginTimeout || "30s";
+    $("#settings-request-timeout").value = settings.upstream?.requestTimeout || "0s";
+    $("#settings-user-agent").value = settings.upstream?.userAgent || "";
+    $("#settings-strategy").value = settings.auth?.strategy || "round_robin";
+    $("#settings-auto-relogin").checked = Boolean(settings.auth?.autoRelogin);
+    $("#settings-checkin-enable").checked = Boolean(settings.checkin?.enable);
+    $("#settings-checkin-path").value = settings.checkin?.path || "";
+    $("#settings-checkin-at").value = settings.checkin?.at || "04:00";
+    $("#settings-checkin-timezone").value = settings.checkin?.timezone || "Asia/Shanghai";
+  }
+
+  async function loadSettings() {
+    try { setSettingsForm(await api("/admin/api/config")); $("#settings-error").textContent = ""; }
+    catch (error) { $("#settings-error").textContent = error.message; }
+  }
+
+  async function saveSettings(event) {
+    event.preventDefault();
+    const button = $("#settings-save");
+    button.disabled = true;
+    $("#settings-error").textContent = "";
+    const payload = { server: { addr: $("#settings-server-addr").value.trim() }, upstream: {
+      baseURL: $("#settings-base-url").value.trim(), openAIBaseURL: $("#settings-openai-url").value.trim(),
+      loginPath: $("#settings-login-path").value.trim(), loginTimeout: $("#settings-login-timeout").value.trim(),
+      requestTimeout: $("#settings-request-timeout").value.trim(), userAgent: $("#settings-user-agent").value.trim(),
+    }, auth: { strategy: $("#settings-strategy").value, autoRelogin: $("#settings-auto-relogin").checked }, checkin: {
+      enable: $("#settings-checkin-enable").checked, path: $("#settings-checkin-path").value.trim(),
+      at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
+    }};
+    try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
+    catch (error) { $("#settings-error").textContent = error.message; }
+    finally { button.disabled = false; }
   }
 
   function renderModels() {
@@ -225,6 +267,25 @@
     }
   }
 
+  function renderCreditModelStats() {
+    const stats = state.creditUsage && Array.isArray(state.creditUsage.modelStats) ? state.creditUsage.modelStats : [];
+    const rows = $("#usage-rows");
+    const cards = $("#usage-cards");
+    rows.replaceChildren(); cards.replaceChildren();
+    $("#usage-empty").hidden = stats.length > 0 || !state.analyticsLoaded;
+    $("#usage-table-wrap").hidden = stats.length === 0;
+    $("#usage-cards").hidden = stats.length === 0;
+    $("#usage-title").nextElementSibling.textContent = "按积分流水汇总，包含本地实时记录和上游退款";
+    for (const item of stats) {
+      const row = element("tr");
+      row.append(element("td", "model-id", item.model || "--"), element("td", "", formatNumber(item.requests)), element("td", "", formatNumber(item.creditsUsed) + " 积分"), element("td", "credit-positive", formatNumber(item.creditsRefunded) + " 积分"), element("td", "", formatNumber(item.netCredits) + " 积分"), element("td", "", formatTime(item.lastUsedAt)));
+      rows.append(row);
+      const card = element("article", "usage-card");
+      card.append(element("div", "usage-card-top", item.model || "--"), element("div", "usage-card-counts", "请求 " + formatNumber(item.requests) + " · 扣除 " + formatNumber(item.creditsUsed) + " · 退回 " + formatNumber(item.creditsRefunded) + " · 净消耗 " + formatNumber(item.netCredits)), element("div", "usage-card-details", "最近 " + formatTime(item.lastUsedAt)));
+      cards.append(card);
+    }
+  }
+
   function renderUsage() {
     const usage = state.usage;
     const rows = $("#usage-rows");
@@ -244,39 +305,6 @@
       formatPercent(Number(usage.successes || 0) / Number(usage.totalRequests)) : "--";
     $("#usage-latency").textContent = formatDuration(usage.averageLatencyMs);
     $("#usage-period").textContent = usage.startedAt ? "进程启动于 " + formatTime(usage.startedAt) : "进程启动以来";
-    const allModels = Array.isArray(usage.models) ? usage.models : [];
-    const filter = $("#usage-model-filter");
-    const modelNames = allModels.map(item => item.model || "未指定");
-    const previousFilter = state.usageFilter;
-    filter.replaceChildren(element("option", "", "全部模型"));
-    filter.firstChild.value = "";
-    for (const name of modelNames) filter.append(element("option", "", name));
-    state.usageFilter = modelNames.includes(previousFilter) ? previousFilter : "";
-    filter.value = state.usageFilter;
-    const models = state.usageFilter ? allModels.filter(item => (item.model || "未指定") === state.usageFilter) : allModels;
-    $("#usage-empty").hidden = models.length > 0 || !state.analyticsLoaded;
-    $("#usage-table-wrap").hidden = models.length === 0;
-    $("#usage-cards").hidden = models.length === 0;
-    for (const item of models) {
-      const model = item.model || "未指定";
-      const latency = formatDuration(item.averageLatencyMs);
-      const lastUsed = formatTime(item.lastUsedAt);
-      const row = element("tr");
-      row.append(element("td", "model-id", model), element("td", "", formatNumber(item.requests)),
-        element("td", "result-success", formatNumber(item.successes)), element("td", "result-error", formatNumber(item.failures)),
-        element("td", "", latency), element("td", "", lastUsed));
-      rows.append(row);
-
-      const card = element("article", "usage-card");
-      const top = element("div", "usage-card-top");
-      top.append(element("strong", "model-id", model), element("span", "usage-request-count", formatNumber(item.requests) + " 次"));
-      const counts = element("div", "usage-card-counts");
-      counts.append(element("span", "result-success", "成功 " + formatNumber(item.successes)), element("span", "result-error", "失败 " + formatNumber(item.failures)));
-      const details = element("div", "usage-card-details");
-      details.append(element("span", "", "平均 " + latency), element("span", "", "最近 " + lastUsed));
-      card.append(top, counts, details);
-      cards.append(card);
-    }
   }
 
   async function loadAnalytics(force = false) {
@@ -325,6 +353,7 @@
       state.analyticsLoaded = true;
       renderModels();
       renderUsage();
+      renderCreditModelStats();
       renderCreditUsage();
     } catch (error) {
       if (error.message !== "登录状态已过期，请重新登录") showToast(error.message);
@@ -765,16 +794,16 @@
   });
   $("#refresh-button").addEventListener("click", () => refresh(true, true));
   $("#analytics-refresh").addEventListener("click", () => loadAnalytics(true));
-  $("#usage-model-filter").addEventListener("change", event => {
-    state.usageFilter = event.target.value;
-    renderUsage();
-  });
+  $("#settings-refresh").addEventListener("click", loadSettings);
+  $("#settings-form").addEventListener("submit", saveSettings);
   document.querySelectorAll("[data-view]").forEach(button => {
     button.addEventListener("click", () => selectView(button.dataset.view));
     button.addEventListener("keydown", event => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
-      const view = button.dataset.view === "accounts" ? "analytics" : "accounts";
+      const views = Array.from(document.querySelectorAll("[data-view]")).map(item => item.dataset.view);
+      const current = views.indexOf(button.dataset.view);
+      const view = views[(current + (event.key === "ArrowRight" ? 1 : views.length - 1)) % views.length];
       selectView(view);
       $("[data-view='" + view + "']").focus();
     });

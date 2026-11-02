@@ -2,10 +2,6 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "config.toml" (
-  echo config.toml is missing. Copy config.example.toml to config.toml and edit it first.
-  exit /b 1
-)
 if not exist "bin\clodesen2api.exe" (
   echo binary is missing: bin\clodesen2api.exe
   exit /b 1

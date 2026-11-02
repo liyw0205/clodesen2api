@@ -66,9 +66,6 @@ func (u *Upstream) AccountCredentials() []AccountCredential {
 // ReplaceAccounts prepares replacement sessions before swapping the pool. In
 // flight requests keep their old session pointers until they complete.
 func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
-	if len(credentials) == 0 {
-		return errors.New("at least one upstream account is required")
-	}
 	prepared := make([]*Upstream, 0, len(credentials))
 	seenIDs := make(map[string]struct{}, len(credentials))
 	seenIdentifiers := make(map[string]struct{}, len(credentials))
@@ -110,7 +107,7 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 		u.creditMu.RUnlock()
 		prepared = append(prepared, account)
 	}
-	if enabledCount == 0 {
+	if len(credentials) > 0 && enabledCount == 0 {
 		return errors.New("at least one upstream account must be enabled")
 	}
 
@@ -128,7 +125,11 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 	}
 	u.accounts = prepared
 	u.cooldownUntil = nextCooldown
-	u.nextAccount %= len(prepared)
+	if len(prepared) == 0 {
+		u.nextAccount = 0
+	} else {
+		u.nextAccount %= len(prepared)
+	}
 	return nil
 }
 
@@ -153,6 +154,9 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 	accounts := u.accountsSnapshot()
 	direct := len(accounts) == 0
 	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return nil
+		}
 		accounts = []*Upstream{u}
 	}
 	statuses := make([]AccountStatus, len(accounts))
@@ -226,6 +230,9 @@ func (u *Upstream) RedeemCode(ctx context.Context, accountID, code string) Redem
 	code = strings.TrimSpace(code)
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return RedemptionResult{AccountID: accountID, Status: "error", Message: "未配置上游账号"}
+		}
 		accounts = []*Upstream{u}
 	}
 	var account *Upstream

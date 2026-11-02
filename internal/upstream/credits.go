@@ -69,6 +69,9 @@ type accountResponse struct {
 func (u *Upstream) ListPricing(ctx context.Context) (defaultCredits *int64, models []ModelPricing, err error) {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return nil, nil, errors.New("no upstream account configured")
+		}
 		accounts = []*Upstream{u}
 	}
 	var lastErr error
@@ -104,6 +107,9 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 	accounts := u.accountsSnapshot()
 	direct := len(accounts) == 0
 	if direct {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return nil, errors.New("no upstream account configured")
+		}
 		accounts = []*Upstream{u}
 	}
 	var wg sync.WaitGroup
@@ -132,8 +138,12 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 			}
 			items := make([]CreditUsageRecord, 0, len(payload.Account.Transactions))
 			for _, transaction := range payload.Account.Transactions {
-				if transaction.Type != "model_usage" && transaction.Type != "refund" {
+				typeName := strings.ToLower(strings.TrimSpace(transaction.Type))
+				if typeName != "model_usage" && !strings.Contains(typeName, "refund") {
 					continue
+				}
+				if typeName != "model_usage" {
+					typeName = "refund"
 				}
 				model := strings.TrimSpace(transaction.Model)
 				if model == "" {
@@ -144,7 +154,7 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 					Identifier: account.cfg.Auth.Identifier, Model: model,
 					Amount: transaction.Amount, BalanceAfter: transaction.BalanceAfter,
 					BalanceKnown: true,
-					Type:         transaction.Type, Description: transaction.Description,
+					Type:         typeName, Description: transaction.Description,
 					Status: transaction.Status, CreatedAt: transaction.CreatedAt, Source: "upstream",
 				})
 			}

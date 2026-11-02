@@ -88,6 +88,17 @@ input::placeholder { color: #829087; }
 .analytics-period { margin: 0; color: var(--muted); font-size: 13px; line-height: 20px; text-align: right; }
 .analytics-section { margin-top: 30px; }
 .analytics-section .section-heading { margin-bottom: 12px; }
+.settings-view { max-width: 980px; }
+.settings-section { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
+.settings-section .section-heading { margin-bottom: 16px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settings-grid label { display: grid; gap: 7px; color: var(--ink); }
+.settings-grid input, .settings-grid select { width: 100%; min-height: 42px; padding: 9px 11px; color: var(--ink); background: var(--surface); border: 1px solid #bdc9c0; border-radius: 6px; font: inherit; }
+.settings-span { grid-column: 1 / -1; }
+.checkbox-setting { display: flex !important; align-items: center; grid-template-columns: auto 1fr; gap: 9px !important; min-height: 42px; }
+.checkbox-setting input { width: 17px; min-height: 17px; }
+.settings-actions { display: flex; align-items: center; justify-content: end; gap: 16px; margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--line); }
+.settings-actions .field-note { margin-right: auto; }
 .usage-filter { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; line-height: 20px; }
 .usage-filter select { min-height: 36px; padding: 6px 28px 6px 10px; color: var(--ink); background: var(--surface); border: 1px solid #bdc9c0; border-radius: 6px; font-size: 13px; }
 .model-table td, .usage-table td { font-size: 14px; line-height: 20px; }
@@ -213,6 +224,10 @@ input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var
   .analytics-summary { grid-template-columns: 1fr 1fr; gap: 16px; }
   .analytics-period { grid-column: 1 / -1; }
   .analytics-section { margin-top: 24px; }
+  .settings-grid { grid-template-columns: 1fr; }
+  .settings-span { grid-column: auto; }
+  .settings-actions { align-items: stretch; flex-direction: column; }
+  .settings-actions .field-note { margin-right: 0; }
   .analytics-section .section-heading { align-items: start; }
   .usage-filter { width: 100%; justify-content: space-between; }
   .usage-filter select { flex: 1; min-width: 0; }

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"clodesen2api/internal/config"
 	"clodesen2api/internal/upstream"
 )
 
@@ -37,6 +39,8 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Allow", "GET, PUT")
 			writeError(w, http.StatusMethodNotAllowed, "方法不支持")
 		}
+	case r.URL.Path == "/admin/api/config":
+		s.configRoute(w, r)
 	case r.URL.Path == "/admin/api/models":
 		if r.Method == http.MethodGet {
 			s.listModels(w, r)
@@ -175,7 +179,112 @@ func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"records": items, "refreshedAt": time.Now()})
+	writeJSON(w, http.StatusOK, map[string]any{"records": items, "modelStats": creditModelStats(records), "refreshedAt": time.Now()})
+}
+
+func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {
+	if s.cfg == nil {
+		writeError(w, http.StatusServiceUnavailable, "配置管理不可用")
+		return
+	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.cfg.PublicSettings())
+	case http.MethodPut:
+		var settings config.PublicSettings
+		if err := decodeJSON(w, r, &settings); err != nil {
+			writeError(w, http.StatusBadRequest, "配置格式无效")
+			return
+		}
+		previous := s.cfg.PublicSettings()
+		previousStrategy := ""
+		if s.store != nil {
+			previousStrategy = s.store.Strategy()
+		}
+		if err := s.cfg.ApplyPublicSettings(settings); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if s.store != nil && previousStrategy != settings.Auth.Strategy {
+			if err := s.store.SetStrategy(settings.Auth.Strategy); err != nil {
+				_ = s.cfg.ApplyPublicSettings(previous)
+				writeError(w, http.StatusInternalServerError, "保存账号策略失败")
+				return
+			}
+		}
+		if err := s.cfg.Save(); err != nil {
+			_ = s.cfg.ApplyPublicSettings(previous)
+			if s.store != nil && previousStrategy != settings.Auth.Strategy {
+				_ = s.store.SetStrategy(previousStrategy)
+			}
+			writeError(w, http.StatusInternalServerError, "保存配置失败")
+			return
+		}
+		if s.upstream != nil {
+			s.upstream.ApplyRuntimeConfig(s.cfg)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"settings": s.cfg.PublicSettings(), "restartRequired": true})
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, http.StatusMethodNotAllowed, "方法不支持")
+	}
+}
+
+type modelCreditStat struct {
+	Model           string `json:"model"`
+	Requests        int    `json:"requests"`
+	Refunds         int    `json:"refunds"`
+	CreditsUsed     int64  `json:"creditsUsed"`
+	CreditsRefunded int64  `json:"creditsRefunded"`
+	NetCredits      int64  `json:"netCredits"`
+	LastUsedAt      string `json:"lastUsedAt,omitempty"`
+}
+
+func creditModelStats(records []upstream.CreditUsageRecord) []modelCreditStat {
+	stats := make(map[string]*modelCreditStat)
+	for _, record := range records {
+		model := strings.TrimSpace(record.Model)
+		if model == "" {
+			model = "未标注模型"
+		}
+		stat := stats[model]
+		if stat == nil {
+			stat = &modelCreditStat{Model: model}
+			stats[model] = stat
+		}
+		switch record.Type {
+		case "refund":
+			stat.Refunds++
+			if record.Amount > 0 {
+				stat.CreditsRefunded += record.Amount
+			}
+		case "model_usage", "local_request":
+			stat.Requests++
+			if record.Amount < 0 {
+				stat.CreditsUsed += -record.Amount
+			}
+		}
+		stat.NetCredits = stat.CreditsUsed - stat.CreditsRefunded
+		if latest, ok := parseCreditTime(stat.LastUsedAt); !ok || func() bool {
+			current, valid := parseCreditTime(record.CreatedAt)
+			return valid && current.After(latest)
+		}() {
+			stat.LastUsedAt = record.CreatedAt
+		}
+	}
+	result := make([]modelCreditStat, 0, len(stats))
+	for _, stat := range stats {
+		result = append(result, *stat)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].NetCredits != result[j].NetCredits {
+			return result[i].NetCredits > result[j].NetCredits
+		}
+		return result[i].Model < result[j].Model
+	})
+	return result
 }
 
 func forceRefresh(r *http.Request) bool {

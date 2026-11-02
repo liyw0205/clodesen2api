@@ -149,9 +149,6 @@ func (s *AccountStore) writeLocked() error {
 }
 
 func validateCredentials(accounts []upstream.AccountCredential) error {
-	if len(accounts) == 0 {
-		return errors.New("at least one account is required")
-	}
 	if len(accounts) > 100 {
 		return errors.New("at most 100 accounts are supported")
 	}
@@ -173,7 +170,7 @@ func validateCredentials(accounts []upstream.AccountCredential) error {
 		identifiers[key] = struct{}{}
 		enabled = enabled || account.Enabled
 	}
-	if !enabled {
+	if len(accounts) > 0 && !enabled {
 		return errors.New("at least one account must be enabled")
 	}
 	return nil

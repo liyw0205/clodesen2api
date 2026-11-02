@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"clodesen2api/internal/config"
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
 )
@@ -40,6 +41,8 @@ type Service struct {
 	localCreditMu       sync.Mutex
 	localCreditUsage    []upstream.CreditUsageRecord
 	localCreditPath     string
+	cfg                 *config.Config
+	configMu            sync.Mutex
 }
 
 func NewHandler(up *upstream.Upstream, store *AccountStore, token string, collectors ...*usage.Collector) http.Handler {
@@ -47,6 +50,10 @@ func NewHandler(up *upstream.Upstream, store *AccountStore, token string, collec
 }
 
 func NewHandlerWithTokenFile(up *upstream.Upstream, store *AccountStore, token, tokenFile string, collectors ...*usage.Collector) http.Handler {
+	return NewHandlerWithConfig(up, store, token, tokenFile, nil, collectors...)
+}
+
+func NewHandlerWithConfig(up *upstream.Upstream, store *AccountStore, token, tokenFile string, cfg *config.Config, collectors ...*usage.Collector) http.Handler {
 	collector := usage.New()
 	if len(collectors) > 0 && collectors[0] != nil {
 		collector = collectors[0]
@@ -59,7 +66,7 @@ func NewHandlerWithTokenFile(up *upstream.Upstream, store *AccountStore, token, 
 	service := &Service{
 		upstream: up, store: store, usage: collector,
 		token: strings.TrimSpace(token), tokenFile: tokenFile,
-		sessions: make(map[string]time.Time), localCreditPath: creditPath,
+		sessions: make(map[string]time.Time), localCreditPath: creditPath, cfg: cfg,
 	}
 	service.localCreditUsage = loadLocalCreditUsage(creditPath)
 	if up != nil {

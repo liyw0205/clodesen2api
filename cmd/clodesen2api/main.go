@@ -34,20 +34,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("[fatal] 加载管理账号文件失败: %v", err)
 	}
-	if len(accountStore.Accounts()) == 0 {
-		log.Fatalf("[fatal] 请配置 auth.accounts，或提供 auth.identifier / auth.password")
-	}
 	cfg.Auth.Strategy = accountStore.Strategy()
 	up, err := upstream.NewWithAccounts(cfg, accountStore.Accounts())
 	if err != nil {
 		log.Fatalf("[fatal] 初始化上游账号池失败: %v", err)
 	}
 	usageStats := usage.New()
-	adminHandler := admin.NewHandlerWithTokenFile(up, accountStore, token, cfg.Admin.TokenFile, usageStats)
+	adminHandler := admin.NewHandlerWithConfig(up, accountStore, token, cfg.Admin.TokenFile, cfg, usageStats)
 
 	// 启动时预登录一次，避免首个请求卡在登录超时上
 	log.Printf("[boot] 正在登录上游账号池 (%d 个账号) %s ...", up.AccountCount(), cfg.Upstream.BaseURL)
-	if err := up.Login(context.Background()); err != nil {
+	if up.AccountCount() == 0 {
+		log.Printf("[boot] 尚未配置上游账号，服务将先启动管理面板")
+	} else if err := up.Login(context.Background()); err != nil {
 		log.Printf("[boot] 预登录失败(将延后重试): %v", err)
 	} else {
 		log.Printf("[boot] 预登录成功")
@@ -57,7 +56,7 @@ func main() {
 	defer rootCancel()
 
 	// 启动每日签到调度（仅在配置了账号密码且 checkin.enable=true 时）
-	if cfg.Checkin.Enable {
+	if cfg.Checkin.Enable && up.AccountCount() > 0 {
 		sch, err := checkin.NewScheduler(up, cfg.Checkin.At, cfg.Checkin.Timezone)
 		if err != nil {
 			log.Printf("[boot] 签到调度初始化失败: %v", err)

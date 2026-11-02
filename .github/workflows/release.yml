@@ -36,24 +36,24 @@ jobs:
           - name: linux-amd64
             goos: linux
             goarch: amd64
-            archive: tar.gz
+            archive: zip
             binary: clodesen2api
           - name: linux-arm64
             goos: linux
             goarch: arm64
-            archive: tar.gz
+            archive: zip
             binary: clodesen2api
           - name: linux-armv7
             goos: linux
             goarch: arm
             goarm: '7'
-            archive: tar.gz
+            archive: zip
             binary: clodesen2api
           - name: android-arm64-termux
             goos: android
             goarch: arm64
             buildmode: pie
-            archive: tar.gz
+            archive: zip
             binary: clodesen2api
           - name: windows-amd64
             goos: windows
@@ -94,7 +94,7 @@ jobs:
           else
             cp start.sh stop.sh restart.sh build/$TARGET/
             chmod +x build/$TARGET/*.sh build/$TARGET/bin/*
-            tar -czf "$ARCHIVE.tar.gz" -C build/$TARGET .
+            (cd build/$TARGET && zip -qr "$GITHUB_WORKSPACE/$ARCHIVE.zip" .)
           fi
           sha256sum "$ARCHIVE".* > "$ARCHIVE.sha256"
       - name: Upload package artifact
