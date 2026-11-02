@@ -207,8 +207,9 @@ func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if s.store != nil && previousStrategy != settings.Auth.Strategy {
-			if err := s.store.SetStrategy(settings.Auth.Strategy); err != nil {
+		strategyChanged := s.store != nil && previousStrategy != s.cfg.Auth.Strategy
+		if strategyChanged {
+			if err := s.store.SetStrategy(s.cfg.Auth.Strategy); err != nil {
 				_ = s.cfg.ApplyPublicSettings(previous)
 				writeError(w, http.StatusInternalServerError, "保存账号策略失败")
 				return
@@ -216,7 +217,7 @@ func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.cfg.Save(); err != nil {
 			_ = s.cfg.ApplyPublicSettings(previous)
-			if s.store != nil && previousStrategy != settings.Auth.Strategy {
+			if strategyChanged {
 				_ = s.store.SetStrategy(previousStrategy)
 			}
 			writeError(w, http.StatusInternalServerError, "保存配置失败")
