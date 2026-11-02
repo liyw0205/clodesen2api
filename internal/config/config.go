@@ -45,6 +45,11 @@ type Config struct {
 		At       string // 每天签到时间，HH:MM
 		Timezone string
 	}
+	Redemption struct {
+		Enable bool
+		At     string
+		Code   string
+	}
 }
 
 // PublicSettings excludes credentials and tokens from the management API.
@@ -70,6 +75,12 @@ type PublicSettings struct {
 		At       string `json:"at"`
 		Timezone string `json:"timezone"`
 	} `json:"checkin"`
+	Redemption struct {
+		Enable         bool   `json:"enable"`
+		At             string `json:"at"`
+		Code           string `json:"code,omitempty"`
+		CodeConfigured bool   `json:"codeConfigured"`
+	} `json:"redemption"`
 }
 
 // Load 用 lfhy/flag 注册所有参数，支持 -c config.toml 统一载入。
@@ -104,6 +115,9 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Checkin.Path, "checkin-path", "checkin", "path", "/api/checkin", "签到端点路径")
 	flag.StringConfigVar(&c.Checkin.At, "checkin-at", "checkin", "at", "04:00", "每天签到时间(HH:MM)")
 	flag.StringConfigVar(&c.Checkin.Timezone, "checkin-tz", "checkin", "timezone", "Asia/Shanghai", "签到所用时区")
+	flag.BoolConfigVar(&c.Redemption.Enable, "auto-redeem", "redemption", "enable", false, "是否启用每日自动兑换")
+	flag.StringConfigVar(&c.Redemption.At, "auto-redeem-at", "redemption", "at", "04:30", "自动兑换时间(HH:MM，UTC+8)")
+	flag.StringConfigVar(&c.Redemption.Code, "auto-redeem-code", "redemption", "code", "", "自动兑换码")
 
 	flag.Parse()
 	return c
@@ -123,6 +137,8 @@ func (c *Config) PublicSettings() PublicSettings {
 	out.Upstream.LoginTimeout, out.Upstream.RequestTimeout, out.Upstream.UserAgent = c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent
 	out.Auth.Strategy, out.Auth.AutoRelogin = c.Auth.Strategy, c.Auth.AutoRelogin
 	out.Checkin.Enable, out.Checkin.Path, out.Checkin.At, out.Checkin.Timezone = c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone
+	out.Redemption.Enable, out.Redemption.At = c.Redemption.Enable, c.Redemption.At
+	out.Redemption.CodeConfigured = strings.TrimSpace(c.Redemption.Code) != ""
 	return out
 }
 
@@ -151,12 +167,26 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	if strings.TrimSpace(settings.Checkin.At) == "" || strings.TrimSpace(settings.Checkin.Timezone) == "" {
 		return errors.New("签到时间和时区不能为空")
 	}
+	redemptionAt := strings.TrimSpace(settings.Redemption.At)
+	if redemptionAt == "" {
+		redemptionAt = strings.TrimSpace(c.Redemption.At)
+		if redemptionAt == "" {
+			redemptionAt = "04:30"
+		}
+	}
+	if _, err := time.Parse("15:04", redemptionAt); err != nil {
+		return errors.New("自动兑换时间必须是 HH:MM")
+	}
 	c.Server.Addr = strings.TrimSpace(settings.Server.Addr)
 	c.Upstream.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.BaseURL), "/")
 	c.Upstream.OpenAIBaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.OpenAIBaseURL), "/")
 	c.Upstream.LoginPath, c.Upstream.LoginTimeout, c.Upstream.RequestTimeout, c.Upstream.UserAgent = strings.TrimSpace(settings.Upstream.LoginPath), loginTimeout, requestTimeout, strings.TrimSpace(settings.Upstream.UserAgent)
 	c.Auth.Strategy, c.Auth.AutoRelogin = strategy, settings.Auth.AutoRelogin
 	c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone = settings.Checkin.Enable, strings.TrimSpace(settings.Checkin.Path), strings.TrimSpace(settings.Checkin.At), strings.TrimSpace(settings.Checkin.Timezone)
+	c.Redemption.Enable, c.Redemption.At = settings.Redemption.Enable, redemptionAt
+	if strings.TrimSpace(settings.Redemption.Code) != "" {
+		c.Redemption.Code = strings.TrimSpace(settings.Redemption.Code)
+	}
 	return nil
 }
 
@@ -236,10 +266,16 @@ enable = %t
 path = %q
 at = %q
 timezone = %q
+
+[redemption]
+enable = %t
+at = %q
+code = %q
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
 		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.AutoRelogin,
-		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone)
+		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
+		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
@@ -293,4 +329,8 @@ enable = true
 path = "/api/checkin"
 at = "04:00"
 timezone = "Asia/Shanghai"
+[redemption]
+enable = false
+at = "04:30"
+code = ""
 `

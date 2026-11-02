@@ -889,16 +889,18 @@ func (w flushingWriter) Write(data []byte) (int, error) {
 
 // CheckinResult 解析 /api/checkin 的响应字段，用于日志和幂等判断。
 type CheckinResult struct {
-	Enabled        bool   `json:"enabled"`
-	CheckedIn      bool   `json:"checkedIn"`
-	Reward         int64  `json:"reward"`
-	Date           string `json:"date"`
-	Balance        int64  `json:"balance"`
-	BalanceKnown   bool   `json:"-"`
-	ValidityDays   int64  `json:"validityDays"`
-	CurrentStreak  int64  `json:"currentStreak"`
-	MakeupChances  int64  `json:"makeupChances"`
-	AlreadyChecked bool   `json:"-"` // 本次调用前就已签到
+	Enabled          bool   `json:"enabled"`
+	CheckedIn        bool   `json:"checkedIn"`
+	Reward           int64  `json:"reward"`
+	Date             string `json:"date"`
+	Balance          int64  `json:"balance"`
+	BalanceKnown     bool   `json:"-"`
+	PermanentBalance *int64 `json:"permanentBalance,omitempty"`
+	TemporaryBalance *int64 `json:"temporaryBalance,omitempty"`
+	ValidityDays     int64  `json:"validityDays"`
+	CurrentStreak    int64  `json:"currentStreak"`
+	MakeupChances    int64  `json:"makeupChances"`
+	AlreadyChecked   bool   `json:"-"` // 本次调用前就已签到
 }
 
 // Checkin 执行一次签到。上游接口分两步：
@@ -1024,6 +1026,7 @@ func (u *Upstream) checkinOnce(ctx context.Context, method, host string, withMon
 	if err := json.Unmarshal(body, &res); err != nil {
 		return res, fmt.Errorf("decode checkin response: %w (body=%s)", err, string(body))
 	}
+	res.PermanentBalance, res.TemporaryBalance = parseCreditBreakdown(body)
 	var balanceField struct {
 		Balance *int64 `json:"balance"`
 	}

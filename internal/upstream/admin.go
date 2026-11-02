@@ -20,11 +20,14 @@ type AccountStatus struct {
 	Enabled             bool       `json:"enabled"`
 	CooldownUntil       *time.Time `json:"cooldownUntil,omitempty"`
 	Balance             *int64     `json:"balance,omitempty"`
+	PermanentBalance    *int64     `json:"permanentBalance,omitempty"`
+	TemporaryBalance    *int64     `json:"temporaryBalance,omitempty"`
 	CheckedIn           *bool      `json:"checkedIn,omitempty"`
 	RedemptionEnabled   *bool      `json:"redemptionEnabled,omitempty"`
 	RedemptionLimit     *int64     `json:"redemptionLimit,omitempty"`
 	RedemptionRemaining *int64     `json:"redemptionRemaining,omitempty"`
 	ResetAt             string     `json:"resetAt,omitempty"`
+	RedemptionResetAt   string     `json:"redemptionResetAt,omitempty"`
 	CreditType          string     `json:"creditType,omitempty"`
 	ValidityDays        *int64     `json:"validityDays,omitempty"`
 	RefreshedAt         time.Time  `json:"refreshedAt"`
@@ -37,6 +40,29 @@ type RedemptionResult struct {
 	Status     string `json:"status"`
 	Message    string `json:"message"`
 	Credits    *int64 `json:"credits,omitempty"`
+}
+
+// RedeemCodeAll attempts the configured code once for every enabled account.
+func (u *Upstream) RedeemCodeAll(ctx context.Context, code string) []RedemptionResult {
+	accounts := u.accountsSnapshot()
+	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return nil
+		}
+		accounts = []*Upstream{u}
+	}
+	results := make([]RedemptionResult, 0, len(accounts))
+	for _, account := range accounts {
+		if !account.enabled && len(accounts) > 1 {
+			continue
+		}
+		results = append(results, account.redeemOwnCode(ctx, code))
+	}
+	return results
+}
+
+func (u *Upstream) redeemOwnCode(ctx context.Context, code string) RedemptionResult {
+	return u.redeemCodeForAccount(ctx, u.accountID, code)
 }
 
 // AccountCredentials returns a copy suitable for persistence. Passwords must
@@ -203,6 +229,8 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 		if state.BalanceKnown {
 			status.Balance = int64Pointer(state.Balance)
 		}
+		status.PermanentBalance = state.PermanentBalance
+		status.TemporaryBalance = state.TemporaryBalance
 	}
 
 	quota, err := u.limitedRedemptionRequest(ctx, http.MethodGet, "")
@@ -221,12 +249,27 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 	status.RedemptionRemaining = parseOptionalInt(quota["remaining"])
 	status.RedemptionLimit = parseOptionalInt(quota["limit"])
 	status.ValidityDays = parseOptionalInt(quota["validityDays"])
-	_ = json.Unmarshal(quota["resetAt"], &status.ResetAt)
+	if status.PermanentBalance == nil {
+		status.PermanentBalance = firstOptionalInt(quota, "permanent", "permanentCredits", "permanent_credits", "permanentBalance", "permanent_balance")
+	}
+	if status.TemporaryBalance == nil {
+		status.TemporaryBalance = firstOptionalInt(quota, "temporary", "temporaryCredits", "temporary_credits", "temporaryBalance", "temporary_balance")
+	}
+	resetRaw := quota["resetAt"]
+	if len(resetRaw) == 0 {
+		resetRaw = quota["reset_at"]
+	}
+	status.ResetAt = normalizeResetAt(resetRaw)
+	status.RedemptionResetAt = status.ResetAt
 	_ = json.Unmarshal(quota["creditType"], &status.CreditType)
 	return status
 }
 
 func (u *Upstream) RedeemCode(ctx context.Context, accountID, code string) RedemptionResult {
+	return u.redeemCodeForAccount(ctx, accountID, code)
+}
+
+func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code string) RedemptionResult {
 	code = strings.TrimSpace(code)
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
@@ -246,7 +289,7 @@ func (u *Upstream) RedeemCode(ctx context.Context, accountID, code string) Redem
 		return RedemptionResult{AccountID: accountID, Status: "error", Message: "账号不存在"}
 	}
 	result := RedemptionResult{AccountID: account.accountID, Identifier: account.cfg.Auth.Identifier}
-	if !account.enabled && len(account.accounts) > 0 {
+	if !account.enabled && (u.poolMode || account != u) {
 		result.Status, result.Message = "skipped", "账号已停用"
 		return result
 	}
@@ -377,6 +420,89 @@ func parseOptionalInt(raw json.RawMessage) *int64 {
 		return nil
 	}
 	return &parsed
+}
+
+func firstOptionalInt(values map[string]json.RawMessage, keys ...string) *int64 {
+	for _, key := range keys {
+		if value := parseOptionalInt(values[key]); value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func parseCreditBreakdown(body []byte) (permanent, temporary *int64) {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(body, &root) != nil {
+		return nil, nil
+	}
+	return findCreditBreakdown(root, 0)
+}
+
+func findCreditBreakdown(values map[string]json.RawMessage, depth int) (permanent, temporary *int64) {
+	permanent = firstOptionalInt(values, "permanent", "permanentCredits", "permanent_credits", "permanentBalance", "permanent_balance")
+	temporary = firstOptionalInt(values, "temporary", "temporaryCredits", "temporary_credits", "temporaryBalance", "temporary_balance")
+	if permanent != nil && temporary != nil {
+		return permanent, temporary
+	}
+	if depth >= 2 {
+		return permanent, temporary
+	}
+	for _, key := range []string{"account", "data", "credits", "balance", "user"} {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(values[key], &nested) != nil {
+			continue
+		}
+		p, t := findCreditBreakdown(nested, depth+1)
+		if permanent == nil {
+			permanent = p
+		}
+		if temporary == nil {
+			temporary = t
+		}
+		if permanent != nil && temporary != nil {
+			break
+		}
+	}
+	return permanent, temporary
+}
+
+func normalizeResetAt(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return ""
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+			return parsed.In(chinaLocation()).Format(time.RFC3339)
+		}
+		for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02T15:04:05", "2006-01-02T15:04:05.999999999"} {
+			if parsed, err := time.ParseInLocation(layout, text, chinaLocation()); err == nil {
+				return parsed.Format(time.RFC3339)
+			}
+		}
+		return text
+	}
+	if seconds := parseOptionalInt(raw); seconds != nil {
+		value := *seconds
+		if value > 100000000000 {
+			value /= 1000
+		}
+		return time.Unix(value, 0).In(chinaLocation()).Format(time.RFC3339)
+	}
+	return ""
+}
+
+func chinaLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("UTC+8", 8*60*60)
+	}
+	return loc
 }
 
 func int64Pointer(value int64) *int64 { return &value }

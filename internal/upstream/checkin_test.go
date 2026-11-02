@@ -153,3 +153,22 @@ func TestCheckinResultDecodesUpstreamFields(t *testing.T) {
 		t.Fatalf("unexpected decode: %+v", res)
 	}
 }
+
+func TestCheckinResultDecodesCreditBreakdownAliases(t *testing.T) {
+	raw := []byte(`{"balance":120,"credits":{"permanent_credits":80,"temporaryBalance":"40"}}`)
+	var res CheckinResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	res.PermanentBalance, res.TemporaryBalance = parseCreditBreakdown(raw)
+	if res.PermanentBalance == nil || *res.PermanentBalance != 80 || res.TemporaryBalance == nil || *res.TemporaryBalance != 40 {
+		t.Fatalf("unexpected credit breakdown: permanent=%v temporary=%v", res.PermanentBalance, res.TemporaryBalance)
+	}
+}
+
+func TestNormalizeResetAtUsesChinaTime(t *testing.T) {
+	got := normalizeResetAt(json.RawMessage(`"2026-11-02T00:00:00Z"`))
+	if got != "2026-11-02T08:00:00+08:00" {
+		t.Fatalf("normalizeResetAt() = %q", got)
+	}
+}

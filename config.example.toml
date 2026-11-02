@@ -50,3 +50,9 @@ path = "/api/checkin"
 at = "04:00"
 # 签到时区
 timezone = "Asia/Shanghai"
+
+# 兑换码额度重置：按 UTC+8 每日执行一次；兑换码只在本地配置文件中保存
+[redemption]
+enable = false
+at = "04:30"
+code = ""

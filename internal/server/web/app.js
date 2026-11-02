@@ -9,6 +9,8 @@
     toastTimer: 0,
     refreshTimer: 0,
     availableCredits: null,
+    permanentCredits: null,
+    temporaryCredits: null,
     accountsRefreshedAt: null,
     busy: false,
     analyticsBusy: false,
@@ -107,7 +109,14 @@
     if (!value) return "--";
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "--";
-    return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+    return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+
+  function formatChinaTime(value) {
+    if (!value) return "--";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
   }
 
   function formatDuration(value) {
@@ -183,6 +192,10 @@
     $("#settings-checkin-path").value = settings.checkin?.path || "";
     $("#settings-checkin-at").value = settings.checkin?.at || "04:00";
     $("#settings-checkin-timezone").value = settings.checkin?.timezone || "Asia/Shanghai";
+    $("#settings-redemption-enable").checked = Boolean(settings.redemption?.enable);
+    $("#settings-redemption-at").value = settings.redemption?.at || "04:30";
+    $("#settings-redemption-code").value = "";
+    $("#settings-redemption-note").textContent = settings.redemption?.codeConfigured ? "兑换码已配置，不会回显原文；留空则保留原兑换码。" : "尚未配置兑换码。";
   }
 
   async function loadSettings() {
@@ -202,6 +215,9 @@
     }, auth: { strategy: $("#settings-strategy").value, autoRelogin: $("#settings-auto-relogin").checked }, checkin: {
       enable: $("#settings-checkin-enable").checked, path: $("#settings-checkin-path").value.trim(),
       at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
+    }, redemption: {
+      enable: $("#settings-redemption-enable").checked, at: $("#settings-redemption-at").value,
+      code: $("#settings-redemption-code").value.trim(),
     }};
     try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
     catch (error) { $("#settings-error").textContent = error.message; }
@@ -378,6 +394,8 @@
     const missingBalance = state.accounts.some(account => account.enabled && !hasNumber(account.balance));
     const totalNode = $("#available-credits");
     totalNode.textContent = state.availableCredits === null ? "--" : formatNumber(state.availableCredits);
+    $("#permanent-credits").textContent = state.permanentCredits === null ? "--" : formatNumber(state.permanentCredits);
+    $("#temporary-credits").textContent = state.temporaryCredits === null ? "--" : formatNumber(state.temporaryCredits);
     $("#enabled-count").textContent = formatNumber(enabled.length);
     $("#cooldown-count").textContent = formatNumber(cooling.length);
     $("#last-updated").textContent = state.accountsRefreshedAt ? formatTime(state.accountsRefreshedAt) : "尚未刷新";
@@ -418,7 +436,7 @@
     const cooldownUntil = account.cooldownUntil ? new Date(account.cooldownUntil) : null;
     if (cooldownUntil && cooldownUntil > new Date()) return "积分不足，冷却至 " + formatTime(account.cooldownUntil);
     if (account.error) return account.error;
-    if (account.resetAt) return "额度重置 " + account.resetAt;
+    if (account.redemptionResetAt || account.resetAt) return "兑换码额度重置 " + formatChinaTime(account.redemptionResetAt || account.resetAt);
     return "更新于 " + formatTime(account.refreshedAt);
   }
 
@@ -459,7 +477,9 @@
       identity.append(element("strong", "", account.identifier));
       identity.append(element("span", "", accountDetail(account)));
       identityCell.append(identity);
-      const balanceCell = element("td", "balance-cell", formatNumber(account.balance));
+      const balanceCell = element("td", "balance-cell");
+      balanceCell.append(element("strong", "", formatNumber(account.balance)));
+      balanceCell.append(element("span", "account-secondary", "永久 " + formatNumber(account.permanentBalance) + " · 临时 " + formatNumber(account.temporaryBalance)));
       const quotaCell = element("td", "quota-cell", quotaText(account));
       const stateCell = element("td");
       stateCell.append(statusBadge(account));
@@ -495,6 +515,7 @@
       const balance = element("div");
       balance.append(element("label", "", "积分余额"));
       balance.append(element("strong", "", formatNumber(account.balance)));
+      balance.append(element("span", "account-secondary", "永久 " + formatNumber(account.permanentBalance) + " · 临时 " + formatNumber(account.temporaryBalance)));
       const quota = element("div");
       quota.append(element("label", "", "兑换额度"));
       quota.append(element("strong", "", quotaText(account)));
@@ -543,6 +564,8 @@
       state.accounts = Array.isArray(result.accounts) ? result.accounts : [];
       state.strategy = result.strategy || "round_robin";
       state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
+      state.permanentCredits = hasNumber(result.permanentCredits) ? Number(result.permanentCredits) : null;
+      state.temporaryCredits = hasNumber(result.temporaryCredits) ? Number(result.temporaryCredits) : null;
       state.accountsRefreshedAt = result.refreshedAt || (state.accounts[0] && state.accounts[0].refreshedAt) || null;
       const enabledIDs = new Set(state.accounts.filter(account => account.enabled).map(account => account.id));
       for (const id of Array.from(state.selected)) if (!enabledIDs.has(id)) state.selected.delete(id);

@@ -1,6 +1,6 @@
 # clodesen2api
 
-OpenAI-compatible gateway with multi-account rotation, random selection, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, and credit usage history.
+OpenAI-compatible gateway with multi-account rotation, random selection, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, credit usage history, and scheduled redemption-code credit resets.
 
 ## Download
 
@@ -26,6 +26,8 @@ GitHub Actions publishes packages for the following targets:
 3. On first access, set a 6-20 character panel token.
 
 Add upstream accounts and adjust runtime settings from the panel. The generated configuration file keeps credentials on disk but never exposes them in the UI.
+
+The panel can schedule one redemption code per day. The schedule uses `Asia/Shanghai` (UTC+8); the code is write-only in the panel and is never included in the configuration API response.
 
 Runtime state, credentials, tokens, logs, and local credit history belong in `data/` and are intentionally excluded from source packages and Git.
 

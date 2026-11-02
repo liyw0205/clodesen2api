@@ -313,13 +313,18 @@ func (s *Service) listAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts := make([]map[string]any, 0, len(statuses))
 	var availableCredits int64
 	availableKnown := true
+	var permanentCredits, temporaryCredits int64
+	permanentKnown, temporaryKnown := true, true
 	for _, status := range statuses {
 		accounts = append(accounts, map[string]any{
 			"id": status.ID, "identifier": maskIdentifier(status.Identifier), "enabled": status.Enabled,
-			"cooldownUntil": status.CooldownUntil, "balance": status.Balance, "checkedIn": status.CheckedIn,
+			"cooldownUntil": status.CooldownUntil, "balance": status.Balance,
+			"permanentBalance": status.PermanentBalance, "temporaryBalance": status.TemporaryBalance,
+			"checkedIn":         status.CheckedIn,
 			"redemptionEnabled": status.RedemptionEnabled, "redemptionLimit": status.RedemptionLimit,
 			"redemptionRemaining": status.RedemptionRemaining, "resetAt": status.ResetAt,
-			"creditType": status.CreditType, "validityDays": status.ValidityDays,
+			"redemptionResetAt": status.RedemptionResetAt,
+			"creditType":        status.CreditType, "validityDays": status.ValidityDays,
 			"refreshedAt": status.RefreshedAt, "error": status.Error,
 		})
 		if status.Enabled && (status.CooldownUntil == nil || !status.CooldownUntil.After(time.Now())) {
@@ -328,11 +333,29 @@ func (s *Service) listAccounts(w http.ResponseWriter, r *http.Request) {
 			} else {
 				availableCredits += *status.Balance
 			}
+			if status.PermanentBalance == nil {
+				permanentKnown = false
+			} else {
+				permanentCredits += *status.PermanentBalance
+			}
+			if status.TemporaryBalance == nil {
+				temporaryKnown = false
+			} else {
+				temporaryCredits += *status.TemporaryBalance
+			}
 		}
 	}
-	response := map[string]any{"accounts": accounts, "strategy": s.upstream.Strategy(), "refreshedAt": time.Now()}
+	response := map[string]any{"accounts": accounts, "strategy": s.upstream.Strategy(), "refreshedAt": time.Now(),
+		"availableCredits": nil, "permanentCredits": nil, "temporaryCredits": nil,
+		"creditBreakdownKnown": permanentKnown && temporaryKnown}
 	if availableKnown {
 		response["availableCredits"] = availableCredits
+	}
+	if permanentKnown {
+		response["permanentCredits"] = permanentCredits
+	}
+	if temporaryKnown {
+		response["temporaryCredits"] = temporaryCredits
 	}
 	result, _ := json.Marshal(response)
 	s.accountCache = append(s.accountCache[:0], result...)

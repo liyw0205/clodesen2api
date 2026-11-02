@@ -14,6 +14,7 @@ import (
 	"clodesen2api/internal/admin"
 	"clodesen2api/internal/checkin"
 	"clodesen2api/internal/config"
+	"clodesen2api/internal/redemption"
 	"clodesen2api/internal/server"
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
@@ -67,6 +68,19 @@ func main() {
 		}
 	} else {
 		log.Printf("[boot] 签到已跳过 (enable=%v)", cfg.Checkin.Enable)
+	}
+
+	if cfg.Redemption.Enable && cfg.Redemption.Code != "" && up.AccountCount() > 0 {
+		sch, err := redemption.NewScheduler(up, cfg.Redemption.At, cfg.Redemption.Code)
+		if err != nil {
+			log.Printf("[boot] 自动兑换调度初始化失败: %v", err)
+		} else {
+			log.Printf("[boot] 自动兑换已启动，时区=Asia/Shanghai 每日 %s", cfg.Redemption.At)
+			go sch.Run(rootCtx)
+			defer sch.Stop()
+		}
+	} else {
+		log.Printf("[boot] 自动兑换已跳过 (enable=%v, codeConfigured=%v)", cfg.Redemption.Enable, cfg.Redemption.Code != "")
 	}
 
 	srv := &http.Server{
