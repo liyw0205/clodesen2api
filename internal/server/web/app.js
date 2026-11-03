@@ -20,6 +20,7 @@
     creditUsageBusy: false,
     creditUsagePage: 1,
     creditUsagePageSize: 20,
+    settings: null,
   };
 
   const loginPanel = $("#login-panel");
@@ -242,6 +243,7 @@
   }
 
   function setSettingsForm(settings) {
+    state.settings = settings;
     $("#settings-server-addr").value = settings.server?.addr || "";
     $("#settings-base-url").value = settings.upstream?.baseURL || "";
     $("#settings-openai-url").value = settings.upstream?.openAIBaseURL || "";
@@ -255,10 +257,16 @@
     $("#settings-checkin-path").value = settings.checkin?.path || "";
     $("#settings-checkin-at").value = settings.checkin?.at || "04:00";
     $("#settings-checkin-timezone").value = settings.checkin?.timezone || "Asia/Shanghai";
-    $("#settings-redemption-enable").checked = Boolean(settings.redemption?.enable);
-    $("#settings-redemption-at").value = settings.redemption?.at || "04:30";
-    $("#settings-redemption-code").value = "";
-    $("#settings-redemption-note").textContent = settings.redemption?.codeConfigured ? "兑换码已配置，不会回显原文；留空则保留原兑换码。" : "尚未配置兑换码。";
+    setRedemptionSettingsForm(settings);
+  }
+
+  function setRedemptionSettingsForm(settings) {
+    state.settings = settings;
+    $("#redemption-auto-enable").checked = Boolean(settings?.redemption?.enable);
+    $("#redemption-auto-at").value = settings?.redemption?.at || "04:30";
+    $("#redemption-auto-code").value = "";
+    $("#redemption-auto-note").textContent = settings?.redemption?.codeConfigured ? "兑换码已配置，不会回显原文；留空则保留原兑换码。" : "尚未配置兑换码。";
+    $("#redemption-auto-error").textContent = "";
   }
 
   async function loadSettings() {
@@ -279,12 +287,43 @@
       enable: $("#settings-checkin-enable").checked, path: $("#settings-checkin-path").value.trim(),
       at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
     }, redemption: {
-      enable: $("#settings-redemption-enable").checked, at: $("#settings-redemption-at").value,
-      code: $("#settings-redemption-code").value.trim(),
+      enable: Boolean(state.settings?.redemption?.enable), at: state.settings?.redemption?.at || "04:30",
+      code: "",
     }};
     try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
     catch (error) { $("#settings-error").textContent = error.message; }
     finally { button.disabled = false; }
+  }
+
+  async function loadRedemptionSettings() {
+    try {
+      const settings = await api("/admin/api/config");
+      setRedemptionSettingsForm(settings);
+    } catch (error) {
+      if (error.message !== "登录状态已过期，请重新登录") $("#redemption-auto-error").textContent = error.message;
+    }
+  }
+
+  async function saveRedemptionSettings() {
+    const button = $("#redemption-settings-save");
+    button.disabled = true;
+    $("#redemption-auto-error").textContent = "";
+    try {
+      const current = state.settings || await api("/admin/api/config");
+      const payload = JSON.parse(JSON.stringify(current));
+      payload.redemption = {
+        enable: $("#redemption-auto-enable").checked,
+        at: $("#redemption-auto-at").value,
+        code: $("#redemption-auto-code").value.trim(),
+      };
+      const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) });
+      setRedemptionSettingsForm(result.settings);
+      showToast(result.restartRequired ? "自动兑换设置已保存，重启后完整生效" : "自动兑换设置已保存");
+    } catch (error) {
+      $("#redemption-auto-error").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function renderModels() {
@@ -424,13 +463,15 @@
     }
   }
 
-  async function loadAnalytics(force = false) {
-    if (state.analyticsBusy || (state.analyticsLoaded && !force)) return;
+  async function loadAnalytics(force = false, silent = false) {
+    if (state.analyticsBusy || (state.analyticsLoaded && !force && !silent)) return;
     state.analyticsBusy = true;
     const button = $("#analytics-refresh");
-    button.disabled = true;
     const oldLabel = button.textContent;
-    button.textContent = "读取中";
+    if (!silent) {
+      button.disabled = true;
+      button.textContent = "读取中";
+    }
     $("#model-error").hidden = true;
     $("#credit-usage-error").hidden = true;
     try {
@@ -474,8 +515,10 @@
       if (error.message !== "登录状态已过期，请重新登录") showToast(error.message);
     } finally {
       state.analyticsBusy = false;
-      button.disabled = false;
-      button.textContent = oldLabel;
+      if (!silent) {
+        button.disabled = false;
+        button.textContent = oldLabel;
+      }
     }
   }
 
@@ -725,6 +768,7 @@
     }
     redeemDialog.showModal();
     $("#redemption-code").focus();
+    void loadRedemptionSettings();
     void loadRedemptionHistory();
   }
 
@@ -925,7 +969,14 @@
 
   function startRefreshTimer() {
     window.clearInterval(state.refreshTimer);
-    state.refreshTimer = 0;
+    state.refreshTimer = window.setInterval(() => {
+      if (dashboard.hidden) return;
+      void refresh(false, false);
+      if (state.analyticsLoaded) void loadAnalytics(false, true);
+      if (redeemDialog.open) {
+        void loadRedemptionHistory();
+      }
+    }, 30000);
   }
 
   loginForm.addEventListener("submit", async event => {
@@ -972,6 +1023,7 @@
   });
   $("#settings-refresh").addEventListener("click", loadSettings);
   $("#settings-form").addEventListener("submit", saveSettings);
+  $("#redemption-settings-save").addEventListener("click", saveRedemptionSettings);
   document.querySelectorAll("[data-view]").forEach(button => {
     button.addEventListener("click", () => selectView(button.dataset.view));
     button.addEventListener("keydown", event => {
