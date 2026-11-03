@@ -107,3 +107,22 @@ func TestForwardRecordsLocalCreditUsage(t *testing.T) {
 		t.Fatal("timed out waiting for local credit record")
 	}
 }
+
+func TestCreditRecordModelLabelsNonModelTransactions(t *testing.T) {
+	tests := []struct {
+		typeName    string
+		description string
+		want        string
+	}{
+		{typeName: "daily_checkin", want: "签到"},
+		{typeName: "limited_redemption", want: "兑换码"},
+		{typeName: "unknown", description: "每日签到奖励", want: "签到"},
+		{typeName: "unknown", description: "兑换码到账", want: "兑换码"},
+		{typeName: "model_usage", description: "模型请求：gpt-image-2", want: "gpt-image-2"},
+	}
+	for _, tt := range tests {
+		if got := creditRecordModel(normalizeCreditType(tt.typeName), tt.description, ""); got != tt.want {
+			t.Errorf("creditRecordModel(%q, %q) = %q, want %q", tt.typeName, tt.description, got, tt.want)
+		}
+	}
+}

@@ -19,9 +19,8 @@ type AccountStatus struct {
 	Identifier          string     `json:"identifier"`
 	Enabled             bool       `json:"enabled"`
 	CooldownUntil       *time.Time `json:"cooldownUntil,omitempty"`
+	CooldownReason      string     `json:"cooldownReason,omitempty"`
 	Balance             *int64     `json:"balance,omitempty"`
-	PermanentBalance    *int64     `json:"permanentBalance,omitempty"`
-	TemporaryBalance    *int64     `json:"temporaryBalance,omitempty"`
 	CheckedIn           *bool      `json:"checkedIn,omitempty"`
 	RedemptionEnabled   *bool      `json:"redemptionEnabled,omitempty"`
 	RedemptionLimit     *int64     `json:"redemptionLimit,omitempty"`
@@ -80,10 +79,12 @@ func (u *Upstream) AccountCredentials() []AccountCredential {
 	credentials := make([]AccountCredential, 0, len(accounts))
 	for _, account := range accounts {
 		credentials = append(credentials, AccountCredential{
-			ID:         account.accountID,
-			Identifier: account.cfg.Auth.Identifier,
-			Password:   account.cfg.Auth.Password,
-			Enabled:    account.enabled,
+			ID:             account.accountID,
+			Identifier:     account.cfg.Auth.Identifier,
+			Password:       account.cfg.Auth.Password,
+			Enabled:        account.enabled,
+			CooldownUntil:  u.cooldownUntilFor(account),
+			CooldownReason: u.cooldownReasonFor(account),
 		})
 	}
 	return credentials
@@ -95,7 +96,6 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 	prepared := make([]*Upstream, 0, len(credentials))
 	seenIDs := make(map[string]struct{}, len(credentials))
 	seenIdentifiers := make(map[string]struct{}, len(credentials))
-	enabledCount := 0
 	for _, credential := range credentials {
 		credential.Identifier = strings.TrimSpace(credential.Identifier)
 		if credential.ID == "" {
@@ -113,10 +113,6 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 		}
 		seenIDs[credential.ID] = struct{}{}
 		seenIdentifiers[key] = struct{}{}
-		if credential.Enabled {
-			enabledCount++
-		}
-
 		accountCfg := *u.cfg
 		accountCfg.Auth.Accounts = ""
 		accountCfg.Auth.Identifier = credential.Identifier
@@ -127,30 +123,44 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 		}
 		account.accountID = credential.ID
 		account.enabled = credential.Enabled
+		account.owner = u
 		u.creditMu.RLock()
 		account.creditRecorder = u.creditRecorder
 		account.creditPricing = cloneCreditPricing(u.creditPricing)
+		account.redemptionRecorder = u.redemptionRecorder
 		u.creditMu.RUnlock()
 		prepared = append(prepared, account)
 	}
-	if len(credentials) > 0 && enabledCount == 0 {
-		return errors.New("at least one upstream account must be enabled")
-	}
-
 	u.poolMu.Lock()
 	defer u.poolMu.Unlock()
 	oldCooldown := make(map[string]time.Time, len(u.cooldownUntil))
+	oldReason := make(map[string]string, len(u.cooldownReason))
 	for account, until := range u.cooldownUntil {
 		oldCooldown[account.accountID] = until
+		oldReason[account.accountID] = u.cooldownReason[account]
 	}
 	nextCooldown := make(map[*Upstream]time.Time)
+	nextReason := make(map[*Upstream]string)
 	for _, account := range prepared {
 		if until := oldCooldown[account.accountID]; until.After(time.Now()) {
 			nextCooldown[account] = until
+			nextReason[account] = normalizeCooldownReason(oldReason[account.accountID])
+		}
+		for _, credential := range credentials {
+			if credential.ID == account.accountID && credential.CooldownUntil != nil && credential.CooldownUntil.After(time.Now()) {
+				if previous := nextCooldown[account]; credential.CooldownUntil.After(previous) {
+					nextCooldown[account] = credential.CooldownUntil.UTC()
+					nextReason[account] = normalizeCooldownReason(credential.CooldownReason)
+				} else if nextReason[account] == "" {
+					nextReason[account] = normalizeCooldownReason(credential.CooldownReason)
+				}
+				break
+			}
 		}
 	}
 	u.accounts = prepared
 	u.cooldownUntil = nextCooldown
+	u.cooldownReason = nextReason
 	if len(prepared) == 0 {
 		u.nextAccount = 0
 	} else {
@@ -187,10 +197,13 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 	}
 	statuses := make([]AccountStatus, len(accounts))
 	var cooldowns map[*Upstream]time.Time
+	var cooldownReasons map[*Upstream]string
 	u.poolMu.Lock()
 	cooldowns = make(map[*Upstream]time.Time, len(u.cooldownUntil))
+	cooldownReasons = make(map[*Upstream]string, len(u.cooldownReason))
 	for account, until := range u.cooldownUntil {
 		cooldowns[account] = until
+		cooldownReasons[account] = u.cooldownReason[account]
 	}
 	u.poolMu.Unlock()
 
@@ -204,6 +217,7 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 		}
 		if until := cooldowns[account]; until.After(time.Now()) {
 			base.CooldownUntil = &until
+			base.CooldownReason = normalizeCooldownReason(cooldownReasons[account])
 		}
 		statuses[i] = base
 		wg.Add(1)
@@ -216,10 +230,52 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 	return statuses
 }
 
+// RefreshAccountStatus fetches the current balance and redemption status for one account.
+func (u *Upstream) RefreshAccountStatus(ctx context.Context, accountID string) (AccountStatus, error) {
+	accounts := u.accountsSnapshot()
+	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return AccountStatus{}, errors.New("未配置上游账号")
+		}
+		if accountID != "" && accountID != u.accountID {
+			return AccountStatus{}, errors.New("账号不存在")
+		}
+		status := AccountStatus{ID: u.accountID, Identifier: u.cfg.Auth.Identifier, Enabled: true, RefreshedAt: time.Now()}
+		return u.refreshAccountStatus(ctx, status), nil
+	}
+	for _, account := range accounts {
+		if account.accountID != accountID {
+			continue
+		}
+		status := AccountStatus{ID: account.accountID, Identifier: account.cfg.Auth.Identifier, Enabled: account.enabled, RefreshedAt: time.Now()}
+		return account.refreshAccountStatus(ctx, status), nil
+	}
+	return AccountStatus{}, errors.New("账号不存在")
+}
+
 func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatus) AccountStatus {
+	owner := u.restrictionOwner()
+	managed := u.owner != nil || u.enabled
+	finalize := func() AccountStatus {
+		if managed {
+			status.Enabled = u.enabled
+		}
+		status.CooldownUntil = owner.cooldownUntilFor(u)
+		status.CooldownReason = owner.cooldownReasonFor(u)
+		return status
+	}
+	if managed {
+		status.Enabled = u.enabled
+		status.CooldownUntil = owner.cooldownUntilFor(u)
+		status.CooldownReason = owner.cooldownReasonFor(u)
+		if !u.enabled {
+			status.Error = "账号已停用"
+			return finalize()
+		}
+	}
 	if err := u.ensureLogin(ctx); err != nil {
 		status.Error = "登录失败"
-		return status
+		return finalize()
 	}
 	state, err := u.checkinOnce(ctx, http.MethodGet, strings.TrimRight(u.cfg.Upstream.BaseURL, "/"), true)
 	if err != nil {
@@ -228,9 +284,12 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 		status.CheckedIn = boolPointer(state.CheckedIn)
 		if state.BalanceKnown {
 			status.Balance = int64Pointer(state.Balance)
+			if state.Balance >= insufficientCreditsThreshold {
+				owner.clearCreditCooldown(u)
+			} else {
+				owner.coolDownUntil(u, time.Now().Add(insufficientCreditsCooldown), cooldownReasonInsufficientCredits)
+			}
 		}
-		status.PermanentBalance = state.PermanentBalance
-		status.TemporaryBalance = state.TemporaryBalance
 	}
 
 	quota, err := u.limitedRedemptionRequest(ctx, http.MethodGet, "")
@@ -238,7 +297,7 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 		if status.Error == "" {
 			status.Error = "读取兑换额度失败"
 		}
-		return status
+		return finalize()
 	}
 	if raw := quota["enabled"]; len(raw) > 0 {
 		var enabled bool
@@ -249,12 +308,6 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 	status.RedemptionRemaining = parseOptionalInt(quota["remaining"])
 	status.RedemptionLimit = parseOptionalInt(quota["limit"])
 	status.ValidityDays = parseOptionalInt(quota["validityDays"])
-	if status.PermanentBalance == nil {
-		status.PermanentBalance = firstOptionalInt(quota, "permanent", "permanentCredits", "permanent_credits", "permanentBalance", "permanent_balance")
-	}
-	if status.TemporaryBalance == nil {
-		status.TemporaryBalance = firstOptionalInt(quota, "temporary", "temporaryCredits", "temporary_credits", "temporaryBalance", "temporary_balance")
-	}
 	resetRaw := quota["resetAt"]
 	if len(resetRaw) == 0 {
 		resetRaw = quota["reset_at"]
@@ -262,14 +315,14 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 	status.ResetAt = normalizeResetAt(resetRaw)
 	status.RedemptionResetAt = status.ResetAt
 	_ = json.Unmarshal(quota["creditType"], &status.CreditType)
-	return status
+	return finalize()
 }
 
 func (u *Upstream) RedeemCode(ctx context.Context, accountID, code string) RedemptionResult {
 	return u.redeemCodeForAccount(ctx, accountID, code)
 }
 
-func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code string) RedemptionResult {
+func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code string) (result RedemptionResult) {
 	code = strings.TrimSpace(code)
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
@@ -288,7 +341,15 @@ func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code str
 	if account == nil {
 		return RedemptionResult{AccountID: accountID, Status: "error", Message: "账号不存在"}
 	}
-	result := RedemptionResult{AccountID: account.accountID, Identifier: account.cfg.Auth.Identifier}
+	result = RedemptionResult{AccountID: account.accountID, Identifier: account.cfg.Auth.Identifier}
+	account.creditMu.RLock()
+	recorder := account.redemptionRecorder
+	account.creditMu.RUnlock()
+	defer func() {
+		if recorder != nil {
+			recorder(code, result)
+		}
+	}()
 	if !account.enabled && (u.poolMode || account != u) {
 		result.Status, result.Message = "skipped", "账号已停用"
 		return result
@@ -332,6 +393,11 @@ func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code str
 	}
 	result.Status = "success"
 	result.Message = fmt.Sprintf("到账 %d 积分", *result.Credits)
+	if account.owner != nil {
+		account.owner.clearCreditCooldown(account)
+	} else {
+		account.clearCreditCooldown(account)
+	}
 	return result
 }
 
@@ -390,6 +456,15 @@ func (u *Upstream) limitedRedemptionRequest(ctx context.Context, method, code st
 		}
 	}
 	if resp.StatusCode/100 != 2 {
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, responseBody); ok {
+			retryable := &safeAccountRetryError{
+				err:            fmt.Errorf("兑换接口返回 HTTP %d", resp.StatusCode),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+			u.restrictionOwner().applyAccountRetryError(u, retryable)
+			return nil, retryable
+		}
 		return nil, fmt.Errorf("兑换接口返回 HTTP %d", resp.StatusCode)
 	}
 	var payload map[string]json.RawMessage
@@ -398,6 +473,15 @@ func (u *Upstream) limitedRedemptionRequest(ctx context.Context, method, code st
 	}
 	var upstreamError string
 	if err := json.Unmarshal(payload["error"], &upstreamError); err == nil && upstreamError != "" {
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, responseBody); ok {
+			retryable := &safeAccountRetryError{
+				err:            errors.New(upstreamError),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+			u.restrictionOwner().applyAccountRetryError(u, retryable)
+			return nil, retryable
+		}
 		return nil, errors.New(upstreamError)
 	}
 	return payload, nil
@@ -420,51 +504,6 @@ func parseOptionalInt(raw json.RawMessage) *int64 {
 		return nil
 	}
 	return &parsed
-}
-
-func firstOptionalInt(values map[string]json.RawMessage, keys ...string) *int64 {
-	for _, key := range keys {
-		if value := parseOptionalInt(values[key]); value != nil {
-			return value
-		}
-	}
-	return nil
-}
-
-func parseCreditBreakdown(body []byte) (permanent, temporary *int64) {
-	var root map[string]json.RawMessage
-	if json.Unmarshal(body, &root) != nil {
-		return nil, nil
-	}
-	return findCreditBreakdown(root, 0)
-}
-
-func findCreditBreakdown(values map[string]json.RawMessage, depth int) (permanent, temporary *int64) {
-	permanent = firstOptionalInt(values, "permanent", "permanentCredits", "permanent_credits", "permanentBalance", "permanent_balance")
-	temporary = firstOptionalInt(values, "temporary", "temporaryCredits", "temporary_credits", "temporaryBalance", "temporary_balance")
-	if permanent != nil && temporary != nil {
-		return permanent, temporary
-	}
-	if depth >= 2 {
-		return permanent, temporary
-	}
-	for _, key := range []string{"account", "data", "credits", "balance", "user"} {
-		var nested map[string]json.RawMessage
-		if json.Unmarshal(values[key], &nested) != nil {
-			continue
-		}
-		p, t := findCreditBreakdown(nested, depth+1)
-		if permanent == nil {
-			permanent = p
-		}
-		if temporary == nil {
-			temporary = t
-		}
-		if permanent != nil && temporary != nil {
-			break
-		}
-	}
-	return permanent, temporary
 }
 
 func normalizeResetAt(raw json.RawMessage) string {

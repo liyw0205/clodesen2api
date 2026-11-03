@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +86,50 @@ func TestForwardCoolsInsufficientAccountAndRetriesNext(t *testing.T) {
 	}
 }
 
+func TestTemporaryBanDoesNotBlockCheckinOrRedemption(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user-auth":
+			_, _ = io.WriteString(w, `{}`)
+		case "/api/checkin":
+			_, _ = io.WriteString(w, `{"enabled":true,"checkedIn":true,"balance":500}`)
+		case "/api/limited-redemption":
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"enabled":true,"remaining":1}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"redemption":{"credits":100}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Checkin.Path = "/api/checkin"
+	p, err := NewWithAccounts(cfg, []AccountCredential{{ID: "banned", Identifier: "banned@example.test", Password: "pw", Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour).UTC()
+	p.cooldownUntil[p.accounts[0]] = until
+	p.cooldownReason[p.accounts[0]] = cooldownReasonTemporaryBan
+
+	if _, err := p.CheckinAccount(context.Background(), "banned"); err != nil {
+		t.Fatalf("CheckinAccount() error = %v", err)
+	}
+	redemption := p.RedeemCode(context.Background(), "banned", "code")
+	if redemption.Status != "success" {
+		t.Fatalf("RedeemCode() = %+v, want success", redemption)
+	}
+	if !p.cooldownUntil[p.accounts[0]].Equal(until) || p.cooldownReason[p.accounts[0]] != cooldownReasonTemporaryBan {
+		t.Fatalf("temporary ban cooldown changed: until=%s reason=%q", p.cooldownUntil[p.accounts[0]], p.cooldownReason[p.accounts[0]])
+	}
+}
+
 func TestForwardRetriesStreamingInsufficientCredits(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
@@ -148,6 +193,236 @@ func TestForwardRetriesStreamingInsufficientCredits(t *testing.T) {
 	if want := []string{"first", "second"}; !reflect.DeepEqual(gotCalls, want) {
 		t.Fatalf("account calls = %v, want %v", gotCalls, want)
 	}
+}
+
+func TestForwardCoolsAccountUntilUpstreamBanEnd(t *testing.T) {
+	var mu sync.Mutex
+	var routeAccounts []string
+	banUntil := time.Now().Add(47 * time.Minute).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user-auth":
+			var login struct {
+				Identifier string `json:"identifier"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&login); err != nil {
+				t.Errorf("decode login: %v", err)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: login.Identifier, Path: "/"})
+			_, _ = io.WriteString(w, `{}`)
+		case "/api/compute-route":
+			cookie, err := r.Cookie("session")
+			if err != nil {
+				t.Fatalf("read session cookie: %v", err)
+			}
+			mu.Lock()
+			routeAccounts = append(routeAccounts, cookie.Value)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if cookie.Value == "first" {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = fmt.Fprintf(w, `{"error":true,"code":"account_restricted","bannedUntil":%q,"message":"account restricted"}`, banUntil.Format(time.RFC3339Nano))
+				return
+			}
+			_, _ = io.WriteString(w, `{"enabled":false}`)
+		case "/api/openai" + openai.EditsPath:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"url":"https://example.test/image.png"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.OpenAIBaseURL = server.URL + "/api/openai"
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	cfg.Auth.Strategy = "round_robin"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	err, wrote := pool.Forward(context.Background(), rec, openai.Request{
+		Method: http.MethodPost, Path: openai.EditsPath, Model: "image-model",
+		ContentType: "application/json", Body: []byte(`{"prompt":"test"}`),
+	})
+	if err != nil || !wrote || rec.Code != http.StatusOK {
+		t.Fatalf("Forward() = (%v, %v), status=%d body=%q", err, wrote, rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	gotRoutes := append([]string(nil), routeAccounts...)
+	mu.Unlock()
+	if want := []string{"first", "second"}; !reflect.DeepEqual(gotRoutes, want) {
+		t.Fatalf("route accounts = %v, want %v", gotRoutes, want)
+	}
+	remaining := time.Until(pool.cooldownUntil[pool.accounts[0]])
+	if remaining < 46*time.Minute || remaining > 47*time.Minute {
+		t.Fatalf("ban cooldown remaining = %s, want close to %s", remaining, 47*time.Minute)
+	}
+}
+
+func TestDetectPermanentAccountRestrictionDisablesAccount(t *testing.T) {
+	restriction, ok := detectAccountRestriction(http.StatusForbidden, []byte(`{"error":"账号已封禁"}`))
+	if !ok || !restriction.disableAccount || restriction.cooldownUntil != nil {
+		t.Fatalf("restriction = %+v, ok=%v; want permanent disable", restriction, ok)
+	}
+}
+
+func TestParseRestrictionTimeAcceptsUnixMilliseconds(t *testing.T) {
+	want := time.Unix(1793664000, 0).UTC()
+	got, ok := parseRestrictionTime("1793664000000")
+	if !ok || !got.Equal(want) {
+		t.Fatalf("parseRestrictionTime() = %s, %v; want %s, true", got, ok, want)
+	}
+}
+
+func TestLoginRestrictionRecordsCooldownForAccount(t *testing.T) {
+	banUntil := time.Now().Add(35 * time.Minute).UTC().Truncate(time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var login struct {
+			Identifier string `json:"identifier"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&login); err != nil {
+			t.Errorf("decode login: %v", err)
+			return
+		}
+		if login.Identifier == "banned" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprintf(w, `{"code":"account_restricted","bannedUntil":%q}`, banUntil.Format(time.RFC3339Nano))
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Auth.Accounts = "banned:pw1,healthy:pw2"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	var recorded struct {
+		id      string
+		enabled bool
+		until   time.Time
+		reason  string
+	}
+	pool.SetAccountStateRecorder(func(id string, enabled bool, until *time.Time, reason string) error {
+		recorded.id = id
+		recorded.enabled = enabled
+		recorded.reason = reason
+		if until != nil {
+			recorded.until = *until
+		}
+		return nil
+	})
+	if err := pool.Login(context.Background()); err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if recorded.id != pool.accounts[0].accountID || !recorded.enabled || !recorded.until.Equal(banUntil) || recorded.reason != cooldownReasonTemporaryBan {
+		t.Fatalf("recorded state = %+v, want account %q enabled until %s", recorded, pool.accounts[0].accountID, banUntil)
+	}
+	if got := pool.cooldownUntil[pool.accounts[0]]; !got.Equal(banUntil) {
+		t.Fatalf("cooldown = %s, want %s", got, banUntil)
+	}
+}
+
+func TestForwardRetriesRetryableHTTPStatusWithNextAccount(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/openai"+openai.ModelsPath {
+			mu.Lock()
+			calls = append(calls, fmt.Sprintf("account-%d", len(calls)+1))
+			callNumber := len(calls)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if callNumber == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"temporary upstream failure"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":[{"id":"ok"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.OpenAIBaseURL = server.URL + "/api/openai"
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	cfg.Auth.Strategy = "round_robin"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, account := range pool.accounts {
+		account.loggedIn = true
+	}
+	for _, account := range pool.accounts {
+		account.httpClient = &http.Client{Jar: account.httpClient.Jar}
+	}
+
+	rec := httptest.NewRecorder()
+	err, wrote := pool.Forward(context.Background(), rec, openai.Request{Method: http.MethodGet, Path: openai.ModelsPath})
+	if err != nil || !wrote {
+		t.Fatalf("Forward() = (%v, %v)", err, wrote)
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"ok"`) {
+		t.Fatalf("response = %d %q", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	got := append([]string(nil), calls...)
+	mu.Unlock()
+	if want := []string{"account-1", "account-2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("account calls = %v, want %v", got, want)
+	}
+}
+
+func TestForwardRetriesNetworkErrorWithNextAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"ok"}]}`)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.OpenAIBaseURL = server.URL
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	cfg.Auth.Strategy = "round_robin"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, account := range pool.accounts {
+		account.loggedIn = true
+	}
+	pool.accounts[0].httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("simulated network interruption")
+	})}
+
+	rec := httptest.NewRecorder()
+	err, wrote := pool.Forward(context.Background(), rec, openai.Request{Method: http.MethodGet, Path: openai.ModelsPath})
+	if err != nil || !wrote || rec.Code != http.StatusOK {
+		t.Fatalf("Forward() = (%v, %v), status=%d body=%q", err, wrote, rec.Code, rec.Body.String())
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestForwardReturnsCooldownWhenEveryAccountUnavailable(t *testing.T) {

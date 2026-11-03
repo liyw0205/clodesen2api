@@ -9,8 +9,7 @@
     toastTimer: 0,
     refreshTimer: 0,
     availableCredits: null,
-    permanentCredits: null,
-    temporaryCredits: null,
+    consumedCredits: null,
     accountsRefreshedAt: null,
     busy: false,
     analyticsBusy: false,
@@ -18,7 +17,9 @@
     models: [],
     usage: null,
     creditUsage: null,
-    usageFilter: "",
+    creditUsageBusy: false,
+    creditUsagePage: 1,
+    creditUsagePageSize: 20,
   };
 
   const loginPanel = $("#login-panel");
@@ -141,7 +142,28 @@
       return hasNumber(model.creditsPerRequest) ? "按用量（参考 " + formatNumber(model.creditsPerRequest) + "）" : "按用量";
     }
     if (hasNumber(model.creditsPerRequest)) return formatNumber(model.creditsPerRequest) + " / 次";
-    return "未配置";
+    return "";
+  }
+
+  function modelPricingParameter(model) {
+    const parts = [];
+    if (typeof model.image_resolution === "string" && model.image_resolution.trim()) {
+      parts.push("分辨率 " + model.image_resolution.trim());
+    }
+    if (typeof model.upstream_model === "string" && model.upstream_model.trim()) {
+      parts.push("基于 " + model.upstream_model.trim());
+    }
+    const pricing = model.tokenPricing;
+    if (pricing && typeof pricing === "object" && !Array.isArray(pricing)) {
+      const labels = { maxOutputTokens: "最大输出", mode: "计费方式", input: "输入", output: "输出", cacheRead: "缓存读取", cacheWrite: "缓存写入", contextAbove: "超出上下文" };
+      for (const [key, value] of Object.entries(pricing)) {
+        if (value === null || value === undefined || typeof value === "object") continue;
+        const label = labels[key] || String(key).replaceAll("_", " ");
+        parts.push(label + " " + (typeof value === "number" ? formatNumber(value) : String(value)));
+        if (parts.length >= 3) break;
+      }
+    }
+    return parts.join(" · ");
   }
 
   function creditAmount(value) {
@@ -169,10 +191,39 @@
     return record.status || "--";
   }
 
-  function creditRecordSource(record) {
-    if (record.source === "local") return "本地实时";
-    if (record.source === "upstream") return "上游校准";
-    return "--";
+  function redemptionHistoryStatus(record) {
+    if (record.status === "success") return "成功";
+    if (record.status === "skipped") return "跳过";
+    return "失败";
+  }
+
+  function renderRedemptionHistory(records) {
+    const list = $("#redemption-history-list");
+    list.replaceChildren();
+    const items = Array.isArray(records) ? records : [];
+    $("#redemption-history-empty").hidden = items.length > 0;
+    for (const record of items) {
+      const item = element("li", "redemption-history-item");
+      const top = element("div", "redemption-history-top");
+      top.append(element("strong", "", record.account || "账号"), element("span", record.status === "success" ? "result-success" : "result-error", redemptionHistoryStatus(record)));
+      const details = element("div", "redemption-history-details");
+      details.append(element("span", "", formatTime(record.createdAt)), element("code", "", record.code || ""));
+      if (record.message) details.append(element("span", "", record.message));
+      item.append(top, details);
+      list.append(item);
+    }
+  }
+
+  async function loadRedemptionHistory() {
+    try {
+      const result = await api("/admin/api/redemption-history?limit=50");
+      renderRedemptionHistory(result.records);
+    } catch (error) {
+      if (error.message !== "登录状态已过期，请重新登录") {
+        $("#redemption-history-empty").textContent = error.message;
+        $("#redemption-history-empty").hidden = false;
+      }
+    }
   }
 
   function selectView(view) {
@@ -246,19 +297,27 @@
     $("#model-table-wrap").hidden = models.length === 0;
     $("#model-cards").hidden = models.length === 0;
     $("#model-empty").hidden = models.length > 0 || !state.analyticsLoaded;
+    const pricedModels = models.some(model => modelCredits(model) || modelPricingParameter(model));
+    $("#model-credits-heading").hidden = !pricedModels;
     for (const model of models) {
       const id = model.id || model.name || "未命名模型";
-      const provider = model.owned_by || model.provider || "--";
-      const created = modelCreated(model.created);
       const credits = modelCredits(model);
+      const parameter = modelPricingParameter(model);
       const row = element("tr");
-      row.append(element("td", "model-id", id), element("td", "model-credits", credits), element("td", "", provider), element("td", "", created));
+      row.append(element("td", "model-id", id));
+      if (pricedModels) {
+        const creditCell = element("td", "model-credits");
+        if (credits) creditCell.append(element("span", "model-credit-value", credits));
+        if (parameter) creditCell.append(element("span", "model-credit-parameter", parameter));
+        row.append(creditCell);
+      }
       rows.append(row);
 
       const card = element("article", "model-card");
       card.append(element("strong", "model-card-id", id));
       const details = element("div", "model-card-details");
-      details.append(element("span", "model-credits", credits), element("span", "", provider), element("span", "", created));
+      if (credits) details.append(element("span", "model-credits", credits));
+      if (parameter) details.append(element("span", "model-credit-parameter", parameter));
       card.append(details);
       cards.append(card);
     }
@@ -267,44 +326,43 @@
   function renderCreditUsage() {
     const result = state.creditUsage;
     const rows = $("#credit-usage-rows");
-    const cards = $("#credit-usage-cards");
     rows.replaceChildren();
-    cards.replaceChildren();
     const records = result && Array.isArray(result.records) ? result.records : [];
-    $("#credit-usage-count").textContent = result ? formatNumber(records.length) + " 条记录" : "尚未读取";
+    const total = result && hasNumber(result.total) ? Number(result.total) : records.length;
+    const netCredits = result && result.totals && hasNumber(result.totals.netCredits) ? " · 净消耗 " + formatNumber(result.totals.netCredits) + " 积分" : "";
+    $("#credit-usage-count").textContent = result ? formatNumber(total) + " 条记录" + netCredits : "尚未读取";
     $("#credit-usage-empty").hidden = records.length > 0 || !state.analyticsLoaded;
     $("#credit-usage-table-wrap").hidden = records.length === 0;
-    $("#credit-usage-cards").hidden = records.length === 0;
+    renderCreditPagination(result);
     for (const record of records) {
       const amount = hasNumber(record.amount) ? Number(record.amount) : 0;
       const amountClass = amount > 0 ? "credit-positive" : amount < 0 ? "credit-negative" : "credit-neutral";
       const row = element("tr");
-      row.append(element("td", "", formatTime(record.createdAt)),
-        element("td", "", record.account || "--"), element("td", "model-id", record.model || "--"),
-        element("td", amountClass, creditAmountText(record)),
-        element("td", "", hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--"),
-        element("td", "", creditRecordSource(record)), element("td", "", creditRecordStatus(record)));
+      const details = element("td", "credit-record-meta");
+      details.dataset.status = record.status || "unknown";
+      details.append(
+        element("span", "credit-meta-badge credit-meta-balance", "余额 " + (hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--")),
+        element("span", "credit-meta-badge credit-meta-status", "状态 " + creditRecordStatus(record)),
+      );
+      const model = element("td", "credit-record-model model-id");
+      model.append(element("span", "credit-model-badge", record.model || "未标注"));
+      const amountCell = element("td", "credit-record-amount");
+      amountCell.append(element("span", "credit-amount-badge " + amountClass, creditAmountText(record)));
+      row.append(element("td", "credit-record-time", formatTime(record.createdAt)),
+        element("td", "credit-record-account", record.account || "--"),
+        model, amountCell, details);
       rows.append(row);
-
-      const card = element("article", "credit-usage-card");
-      const top = element("div", "credit-usage-card-top");
-      top.append(element("strong", "model-id", record.model || "--"), element("span", amountClass, creditAmountText(record)));
-      const details = element("div", "credit-usage-card-details");
-      details.append(element("span", "", record.account || "--"), element("span", "", "余额 " + (hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--")), element("span", "", creditRecordSource(record)), element("span", "", creditRecordStatus(record)), element("span", "", formatTime(record.createdAt)));
-      card.append(top, details);
-      cards.append(card);
     }
   }
 
   function renderCreditModelStats() {
     const stats = state.creditUsage && Array.isArray(state.creditUsage.modelStats) ? state.creditUsage.modelStats : [];
-    const rows = $("#usage-rows");
-    const cards = $("#usage-cards");
+    const rows = $("#model-credit-stats-rows");
+    const cards = $("#model-credit-stats-cards");
     rows.replaceChildren(); cards.replaceChildren();
-    $("#usage-empty").hidden = stats.length > 0 || !state.analyticsLoaded;
-    $("#usage-table-wrap").hidden = stats.length === 0;
-    $("#usage-cards").hidden = stats.length === 0;
-    $("#usage-title").nextElementSibling.textContent = "按积分流水汇总，包含本地实时记录和上游退款";
+    $("#model-credit-stats-empty").hidden = stats.length > 0 || !state.analyticsLoaded;
+    $("#model-credit-stats-table-wrap").hidden = stats.length === 0;
+    $("#model-credit-stats-cards").hidden = stats.length === 0;
     for (const item of stats) {
       const row = element("tr");
       row.append(element("td", "model-id", item.model || "--"), element("td", "", formatNumber(item.requests)), element("td", "", formatNumber(item.creditsUsed) + " 积分"), element("td", "credit-positive", formatNumber(item.creditsRefunded) + " 积分"), element("td", "", formatNumber(item.netCredits) + " 积分"), element("td", "", formatTime(item.lastUsedAt)));
@@ -315,16 +373,20 @@
     }
   }
 
+  function renderCreditPagination(result) {
+    const pagination = $("#credit-usage-pagination");
+    const totalPages = result && hasNumber(result.totalPages) ? Number(result.totalPages) : 1;
+    const page = result && hasNumber(result.page) ? Number(result.page) : state.creditUsagePage;
+    state.creditUsagePage = page;
+    pagination.hidden = !result || totalPages <= 1;
+    $("#credit-page-label").textContent = "第 " + page + " / " + totalPages + " 页";
+    $("#credit-prev-page").disabled = page <= 1;
+    $("#credit-next-page").disabled = page >= totalPages;
+  }
+
   function renderUsage() {
     const usage = state.usage;
-    const rows = $("#usage-rows");
-    const cards = $("#usage-cards");
-    rows.replaceChildren();
-    cards.replaceChildren();
     if (!usage) {
-      $("#usage-empty").hidden = !state.analyticsLoaded;
-      $("#usage-table-wrap").hidden = true;
-      $("#usage-cards").hidden = true;
       return;
     }
     $("#usage-total").textContent = formatNumber(usage.totalRequests);
@@ -333,7 +395,33 @@
     $("#usage-success-rate").textContent = hasNumber(usage.totalRequests) && Number(usage.totalRequests) > 0 ?
       formatPercent(Number(usage.successes || 0) / Number(usage.totalRequests)) : "--";
     $("#usage-latency").textContent = formatDuration(usage.averageLatencyMs);
-    $("#usage-period").textContent = usage.startedAt ? "进程启动于 " + formatTime(usage.startedAt) : "进程启动以来";
+    $("#usage-period").textContent = usage.startedAt ? "累计统计 · 起始于 " + formatTime(usage.startedAt) : "累计统计";
+  }
+
+  function creditUsagePath(force = false) {
+    const params = new URLSearchParams({
+      page: String(state.creditUsagePage),
+      pageSize: String(state.creditUsagePageSize),
+    });
+    if (force) params.set("refresh", "1");
+    return "/admin/api/credit-usage?" + params.toString();
+  }
+
+  async function loadCreditUsage(force = false) {
+    if (state.creditUsageBusy) return;
+    state.creditUsageBusy = true;
+    $("#credit-usage-error").hidden = true;
+    try {
+      state.creditUsage = await api(creditUsagePath(force));
+      renderCreditModelStats();
+      renderCreditUsage();
+    } catch (error) {
+      if (error.message === "登录状态已过期，请重新登录") throw error;
+      $("#credit-usage-error").textContent = error.message;
+      $("#credit-usage-error").hidden = false;
+    } finally {
+      state.creditUsageBusy = false;
+    }
   }
 
   async function loadAnalytics(force = false) {
@@ -344,13 +432,12 @@
     const oldLabel = button.textContent;
     button.textContent = "读取中";
     $("#model-error").hidden = true;
-    $("#usage-error").hidden = true;
     $("#credit-usage-error").hidden = true;
     try {
       const results = await Promise.allSettled([
         api("/admin/api/models" + (force ? "?refresh=1" : "")),
         api("/admin/api/usage"),
-        api("/admin/api/credit-usage" + (force ? "?refresh=1" : "")),
+        api(creditUsagePath(force)),
       ]);
       const modelResult = results[0];
       const usageResult = results[1];
@@ -368,8 +455,7 @@
       } else if (usageResult.reason.message === "登录状态已过期，请重新登录") {
         throw usageResult.reason;
       } else {
-        $("#usage-error").textContent = usageResult.reason.message;
-        $("#usage-error").hidden = false;
+        showToast(usageResult.reason.message);
       }
       if (creditUsageResult.status === "fulfilled") {
         state.creditUsage = creditUsageResult.value;
@@ -396,7 +482,7 @@
   function accountState(account) {
     const cooldownUntil = account.cooldownUntil ? new Date(account.cooldownUntil) : null;
     if (!account.enabled) return { text: "已停用", className: "status-paused" };
-    if (cooldownUntil && cooldownUntil > new Date()) return { text: "冷却至 " + formatTime(account.cooldownUntil), className: "status-cooldown" };
+    if (cooldownUntil && cooldownUntil > new Date()) return { text: cooldownLabel(account) + "，冷却至 " + formatTime(account.cooldownUntil), className: "status-cooldown" };
     if (account.error) return { text: "状态异常", className: "status-error" };
     return { text: "可用", className: "status-ready" };
   }
@@ -407,8 +493,7 @@
     const missingBalance = state.accounts.some(account => account.enabled && !hasNumber(account.balance));
     const totalNode = $("#available-credits");
     totalNode.textContent = state.availableCredits === null ? "--" : formatNumber(state.availableCredits);
-    $("#permanent-credits").textContent = state.permanentCredits === null ? "--" : formatNumber(state.permanentCredits);
-    $("#temporary-credits").textContent = state.temporaryCredits === null ? "--" : formatNumber(state.temporaryCredits);
+    $("#consumed-credits").textContent = state.consumedCredits === null ? "--" : formatNumber(state.consumedCredits);
     $("#enabled-count").textContent = formatNumber(enabled.length);
     $("#cooldown-count").textContent = formatNumber(cooling.length);
     $("#last-updated").textContent = state.accountsRefreshedAt ? formatTime(state.accountsRefreshedAt) : "尚未刷新";
@@ -445,9 +530,13 @@
     return "未知";
   }
 
+  function cooldownLabel(account) {
+    return account.cooldownReason === "temporary_ban" ? "临时封禁" : "积分不足";
+  }
+
   function accountDetail(account) {
     const cooldownUntil = account.cooldownUntil ? new Date(account.cooldownUntil) : null;
-    if (cooldownUntil && cooldownUntil > new Date()) return "积分不足，冷却至 " + formatTime(account.cooldownUntil);
+    if (cooldownUntil && cooldownUntil > new Date()) return cooldownLabel(account) + "，冷却至 " + formatTime(account.cooldownUntil);
     if (account.error) return account.error;
     if (account.redemptionResetAt || account.resetAt) return "兑换码额度重置 " + formatChinaTime(account.redemptionResetAt || account.resetAt);
     return "更新于 " + formatTime(account.refreshedAt);
@@ -492,7 +581,6 @@
       identityCell.append(identity);
       const balanceCell = element("td", "balance-cell");
       balanceCell.append(element("strong", "", formatNumber(account.balance)));
-      balanceCell.append(element("span", "account-secondary", "永久 " + formatNumber(account.permanentBalance) + " · 临时 " + formatNumber(account.temporaryBalance)));
       const quotaCell = element("td", "quota-cell", quotaText(account));
       const stateCell = element("td");
       stateCell.append(statusBadge(account));
@@ -501,6 +589,7 @@
       if (account.checkedIn === false) checkinCell.classList.add("checkin-pending");
       const actionsCell = element("td", "actions-col");
       const actions = element("div", "row-actions");
+      actions.append(actionButton("签到", "checkin"), actionButton("刷新", "refresh"));
       actions.append(actionButton(account.enabled ? "停用" : "启用", "toggle"));
       actions.append(actionButton("编辑", "edit"));
       actions.append(actionButton("移除", "delete", "row-action row-action-danger"));
@@ -528,7 +617,6 @@
       const balance = element("div");
       balance.append(element("label", "", "积分余额"));
       balance.append(element("strong", "", formatNumber(account.balance)));
-      balance.append(element("span", "account-secondary", "永久 " + formatNumber(account.permanentBalance) + " · 临时 " + formatNumber(account.temporaryBalance)));
       const quota = element("div");
       quota.append(element("label", "", "兑换额度"));
       quota.append(element("strong", "", quotaText(account)));
@@ -540,6 +628,7 @@
       data.append(checkin);
       const bottom = element("div", "account-card-bottom");
       const actions = element("div", "account-card-actions");
+      actions.append(actionButton("签到", "checkin"), actionButton("刷新", "refresh"));
       actions.append(actionButton(account.enabled ? "停用" : "启用", "toggle"));
       actions.append(actionButton("编辑", "edit"));
       actions.append(actionButton("移除", "delete", "row-action row-action-danger"));
@@ -577,8 +666,7 @@
       state.accounts = Array.isArray(result.accounts) ? result.accounts : [];
       state.strategy = result.strategy || "round_robin";
       state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
-      state.permanentCredits = hasNumber(result.permanentCredits) ? Number(result.permanentCredits) : null;
-      state.temporaryCredits = hasNumber(result.temporaryCredits) ? Number(result.temporaryCredits) : null;
+      state.consumedCredits = hasNumber(result.consumedCredits) ? Number(result.consumedCredits) : null;
       state.accountsRefreshedAt = result.refreshedAt || (state.accounts[0] && state.accounts[0].refreshedAt) || null;
       const enabledIDs = new Set(state.accounts.filter(account => account.enabled).map(account => account.id));
       for (const id of Array.from(state.selected)) if (!enabledIDs.has(id)) state.selected.delete(id);
@@ -637,6 +725,7 @@
     }
     redeemDialog.showModal();
     $("#redemption-code").focus();
+    void loadRedemptionHistory();
   }
 
   async function saveAccount(event) {
@@ -661,7 +750,7 @@
       });
       accountDialog.close();
       showToast(id ? "账号已更新" : "账号已添加");
-      await refresh(false);
+      await refresh(false, true);
     } catch (error) {
       $("#account-form-error").textContent = error.message;
     } finally {
@@ -676,7 +765,7 @@
         body: JSON.stringify({ enabled }),
       });
       showToast(enabled ? "账号已启用" : "账号已停用");
-      await refresh(false);
+      await refresh(false, true);
     } catch (error) {
       showToast(error.message);
     }
@@ -692,11 +781,44 @@
       confirmDialog.close();
       state.selected.delete(id);
       showToast("账号已移除");
-      await refresh(false);
+      await refresh(false, true);
     } catch (error) {
       $("#confirm-copy").textContent = error.message;
     } finally {
       button.disabled = false;
+    }
+  }
+
+  async function manualCheckin(account = null, button = null) {
+    if (button) button.disabled = true;
+    if (!account) $("#checkin-all-button").disabled = true;
+    try {
+      const path = account ? "/admin/api/accounts/" + encodeURIComponent(account.id) + "/checkin" : "/admin/api/checkin";
+      const result = await api(path, { method: "POST" });
+      showToast(result.message || (account ? "账号签到完成" : "全部账号签到完成"));
+      await refresh(false, true);
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      if (button) button.disabled = false;
+      if (!account) $("#checkin-all-button").disabled = false;
+    }
+  }
+
+  async function refreshAccountStatus(account, button = null) {
+    if (button) button.disabled = true;
+    try {
+      const result = await api("/admin/api/accounts/" + encodeURIComponent(account.id) + "/refresh", { method: "POST" });
+      if (result.account) {
+        const index = state.accounts.findIndex(item => item.id === account.id);
+        if (index >= 0) state.accounts[index] = result.account;
+        render();
+      }
+      showToast(result.ok ? "账号状态已刷新" : (result.account && result.account.error) || "账号状态刷新失败");
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
@@ -745,7 +867,8 @@
       });
       redeemDialog.close();
       showResults(result);
-      await refresh(false);
+      await loadRedemptionHistory();
+      await refresh(false, true);
     } catch (error) {
       $("#redeem-form-error").textContent = error.message;
     } finally {
@@ -776,6 +899,8 @@
     const row = button.closest("[data-account-id]");
     const account = state.accounts.find(item => item.id === row.dataset.accountId);
     if (!account) return;
+    if (button.dataset.action === "checkin") manualCheckin(account, button);
+    if (button.dataset.action === "refresh") refreshAccountStatus(account, button);
     if (button.dataset.action === "toggle") changeEnabled(account, !account.enabled);
     if (button.dataset.action === "edit") openAccountDialog(account);
     if (button.dataset.action === "delete") openDeleteDialog(account);
@@ -787,6 +912,9 @@
       setLogin(session.enabled, session.authenticated, session.setupRequired);
       if (session.authenticated) {
         await refresh();
+        // Load the model catalog and cumulative statistics on the first login,
+        // so the analytics view is ready without a manual refresh.
+        void loadAnalytics();
         startRefreshTimer();
       }
     } catch (error) {
@@ -829,7 +957,19 @@
     setLogin(true, false, false);
   });
   $("#refresh-button").addEventListener("click", () => refresh(true, true));
+  $("#checkin-all-button").addEventListener("click", event => manualCheckin(null, event.currentTarget));
   $("#analytics-refresh").addEventListener("click", () => loadAnalytics(true));
+  $("#credit-prev-page").addEventListener("click", () => {
+    if (state.creditUsagePage <= 1) return;
+    state.creditUsagePage -= 1;
+    loadCreditUsage(false);
+  });
+  $("#credit-next-page").addEventListener("click", () => {
+    const totalPages = state.creditUsage && hasNumber(state.creditUsage.totalPages) ? Number(state.creditUsage.totalPages) : 1;
+    if (state.creditUsagePage >= totalPages) return;
+    state.creditUsagePage += 1;
+    loadCreditUsage(false);
+  });
   $("#settings-refresh").addEventListener("click", loadSettings);
   $("#settings-form").addEventListener("submit", saveSettings);
   document.querySelectorAll("[data-view]").forEach(button => {
@@ -847,6 +987,7 @@
   $("#account-open").addEventListener("click", () => openAccountDialog());
   $("#empty-add").addEventListener("click", () => openAccountDialog());
   $("#redeem-open").addEventListener("click", openRedeemDialog);
+  $("#redeem-history-refresh").addEventListener("click", loadRedemptionHistory);
   accountForm.addEventListener("submit", saveAccount);
   redeemForm.addEventListener("submit", redeem);
   $("#confirm-delete").addEventListener("click", removeAccount);

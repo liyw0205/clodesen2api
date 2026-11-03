@@ -51,15 +51,18 @@ type CreditUsageRecord struct {
 
 type accountResponse struct {
 	Account struct {
+		Balance      *int64 `json:"balance"`
 		Transactions []struct {
-			ID           int64  `json:"id"`
-			Amount       int64  `json:"amount"`
-			BalanceAfter int64  `json:"balance_after"`
-			Type         string `json:"type"`
-			Description  string `json:"description"`
-			Status       string `json:"status"`
-			CreatedAt    string `json:"created_at"`
-			Model        string `json:"model"`
+			ID                int64  `json:"id"`
+			Amount            int64  `json:"amount"`
+			BalanceAfter      *int64 `json:"balance_after"`
+			BalanceAfterCamel *int64 `json:"balanceAfter"`
+			Balance           *int64 `json:"balance"`
+			Type              string `json:"type"`
+			Description       string `json:"description"`
+			Status            string `json:"status"`
+			CreatedAt         string `json:"created_at"`
+			Model             string `json:"model"`
 		} `json:"transactions"`
 	} `json:"account"`
 }
@@ -101,7 +104,7 @@ func (u *Upstream) ListPricing(ctx context.Context) (defaultCredits *int64, mode
 	return nil, nil, lastErr
 }
 
-// ListCreditUsage returns recent model-related transactions from every account.
+// ListCreditUsage returns recent credit transactions from every account.
 // Account failures are tolerated when at least one account responds.
 func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, error) {
 	accounts := u.accountsSnapshot()
@@ -138,22 +141,26 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 			}
 			items := make([]CreditUsageRecord, 0, len(payload.Account.Transactions))
 			for _, transaction := range payload.Account.Transactions {
-				typeName := strings.ToLower(strings.TrimSpace(transaction.Type))
-				if typeName != "model_usage" && !strings.Contains(typeName, "refund") {
-					continue
+				typeName := normalizeCreditType(transaction.Type)
+				model := creditRecordModel(typeName, transaction.Description, transaction.Model)
+				balanceAfter := payload.Account.Balance
+				if transaction.BalanceAfter != nil {
+					balanceAfter = transaction.BalanceAfter
+				} else if transaction.BalanceAfterCamel != nil {
+					balanceAfter = transaction.BalanceAfterCamel
+				} else if transaction.Balance != nil {
+					balanceAfter = transaction.Balance
 				}
-				if typeName != "model_usage" {
-					typeName = "refund"
-				}
-				model := strings.TrimSpace(transaction.Model)
-				if model == "" {
-					model = modelFromDescription(transaction.Description)
+				balance := int64(0)
+				balanceKnown := balanceAfter != nil
+				if balanceKnown {
+					balance = *balanceAfter
 				}
 				items = append(items, CreditUsageRecord{
 					ID: transaction.ID, AccountID: account.accountID,
 					Identifier: account.cfg.Auth.Identifier, Model: model,
-					Amount: transaction.Amount, BalanceAfter: transaction.BalanceAfter,
-					BalanceKnown: true,
+					Amount: transaction.Amount, BalanceAfter: balance,
+					BalanceKnown: balanceKnown,
 					Type:         typeName, Description: transaction.Description,
 					Status: transaction.Status, CreatedAt: transaction.CreatedAt, Source: "upstream",
 				})
@@ -223,6 +230,15 @@ func (u *Upstream) getJSON(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
+			retryable := &safeAccountRetryError{
+				err:            fmt.Errorf("upstream %s returned HTTP %d", path, resp.StatusCode),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+			u.restrictionOwner().applyAccountRetryError(u, retryable)
+			return nil, retryable
+		}
 		return nil, fmt.Errorf("upstream %s returned HTTP %d", path, resp.StatusCode)
 	}
 	return body, nil
@@ -238,6 +254,46 @@ func modelFromDescription(description string) string {
 			}
 			return model
 		}
+	}
+	return ""
+}
+
+func normalizeCreditType(value string) string {
+	typeName := strings.ToLower(strings.TrimSpace(value))
+	if typeName == "" {
+		return "unknown"
+	}
+	if strings.Contains(typeName, "refund") {
+		return "refund"
+	}
+	compact := strings.NewReplacer("-", "_", " ", "_").Replace(typeName)
+	if strings.Contains(compact, "checkin") || strings.Contains(compact, "check_in") || strings.Contains(compact, "daily_checkin") {
+		return "checkin"
+	}
+	if strings.Contains(compact, "redeem") || strings.Contains(compact, "redemption") {
+		return "redeem_code"
+	}
+	return typeName
+}
+
+func creditRecordModel(typeName, description, transactionModel string) string {
+	if model := strings.TrimSpace(transactionModel); model != "" && model != "--" {
+		return model
+	}
+	lowerDescription := strings.ToLower(strings.TrimSpace(description))
+	switch normalizeCreditType(typeName) {
+	case "checkin":
+		return "签到"
+	case "redeem_code":
+		return "兑换码"
+	case "model_usage", "refund", "local_request":
+		return modelFromDescription(description)
+	}
+	if strings.Contains(description, "签到") || strings.Contains(lowerDescription, "check-in") {
+		return "签到"
+	}
+	if strings.Contains(description, "兑换") || strings.Contains(lowerDescription, "redemption") {
+		return "兑换码"
 	}
 	return ""
 }

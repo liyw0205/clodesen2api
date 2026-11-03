@@ -32,15 +32,24 @@ type Service struct {
 	changeMu            sync.Mutex
 	sessions            map[string]time.Time
 	cacheMu             sync.Mutex
+	cacheWriteMu        sync.Mutex
 	accountCache        []byte
 	accountCachedAt     time.Time
+	accountRefreshMu    sync.Mutex
 	modelCache          []byte
 	modelCachedAt       time.Time
+	modelRefreshMu      sync.Mutex
 	creditUsageCache    []upstream.CreditUsageRecord
 	creditUsageCachedAt time.Time
+	creditUsageReady    bool
+	creditRefreshMu     sync.Mutex
+	cachePath           string
 	localCreditMu       sync.Mutex
 	localCreditUsage    []upstream.CreditUsageRecord
 	localCreditPath     string
+	redemptionMu        sync.Mutex
+	redemptionHistory   []RedemptionHistoryRecord
+	redemptionPath      string
 	cfg                 *config.Config
 	configMu            sync.Mutex
 }
@@ -59,19 +68,30 @@ func NewHandlerWithConfig(up *upstream.Upstream, store *AccountStore, token, tok
 		collector = collectors[0]
 	}
 	tokenFile = strings.TrimSpace(tokenFile)
-	creditPath := filepath.Join("data", "credit-usage.json")
-	if tokenFile != "" {
-		creditPath = filepath.Join(filepath.Dir(tokenFile), "credit-usage.json")
+	var creditPath, cachePath, redemptionPath string
+	if cfg != nil {
+		creditPath = filepath.Join("data", "credit-usage.json")
+		cachePath = filepath.Join("data", "admin-cache.json")
+		redemptionPath = filepath.Join("data", "redemption-history.json")
+		if tokenFile != "" {
+			creditPath = filepath.Join(filepath.Dir(tokenFile), "credit-usage.json")
+			cachePath = filepath.Join(filepath.Dir(tokenFile), "admin-cache.json")
+			redemptionPath = filepath.Join(filepath.Dir(tokenFile), "redemption-history.json")
+		}
 	}
 	service := &Service{
 		upstream: up, store: store, usage: collector,
 		token: strings.TrimSpace(token), tokenFile: tokenFile,
-		sessions: make(map[string]time.Time), localCreditPath: creditPath, cfg: cfg,
+		sessions: make(map[string]time.Time), localCreditPath: creditPath, cachePath: cachePath,
+		redemptionPath: redemptionPath, cfg: cfg,
 	}
 	service.localCreditUsage = loadLocalCreditUsage(creditPath)
+	service.redemptionHistory = loadRedemptionHistory(redemptionPath)
+	service.loadPersistentCache()
 	if up != nil {
 		up.SetCreditPricing(fallbackPricing())
 		up.SetCreditUsageRecorder(service.recordLocalCredit)
+		up.SetRedemptionRecorder(service.recordRedemption)
 	}
 	return service
 }

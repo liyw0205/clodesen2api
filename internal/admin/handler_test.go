@@ -269,6 +269,10 @@ func TestAdminAccountManagementAndRedemptionPersist(t *testing.T) {
 	if redeemed.SuccessCount != 2 || redeemed.TotalCredits != 1000 {
 		t.Fatalf("redemption aggregate = %+v, want two accounts and 1000 credits", redeemed)
 	}
+	response, body = requestJSON(t, client, http.MethodGet, server.URL+"/admin/api/redemption-history", "", server.URL)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "test-code") || !strings.Contains(body, "o***e@example.test") {
+		t.Fatalf("redemption history status=%d body=%s", response.StatusCode, body)
+	}
 
 	reopened, err := OpenAccountStore(store.path, "round_robin", nil)
 	if err != nil {
@@ -276,6 +280,30 @@ func TestAdminAccountManagementAndRedemptionPersist(t *testing.T) {
 	}
 	if len(reopened.Accounts()) != 2 || reopened.Strategy() != "round_robin" {
 		t.Fatalf("reopened store = %d accounts, strategy %s", len(reopened.Accounts()), reopened.Strategy())
+	}
+}
+
+func TestAdminCheckinAndSingleAccountRefreshRoutes(t *testing.T) {
+	server, _, _, _ := newAdminTestServer(t)
+	client := &http.Client{Jar: mustCookieJar(t)}
+	response, body := requestJSON(t, client, http.MethodPost, server.URL+"/admin/api/session", jsonBody(t, map[string]string{"token": testAdminToken}), "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, body = requestJSON(t, client, http.MethodPost, server.URL+"/admin/api/checkin", "", server.URL)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"status":"success"`) || !strings.Contains(body, `"checkedIn":true`) {
+		t.Fatalf("all checkin status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, body = requestJSON(t, client, http.MethodPost, server.URL+"/admin/api/accounts/account-one/checkin", "", server.URL)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"alreadyChecked":true`) {
+		t.Fatalf("single checkin status=%d body=%s", response.StatusCode, body)
+	}
+
+	response, body = requestJSON(t, client, http.MethodPost, server.URL+"/admin/api/accounts/account-one/refresh", "", server.URL)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"ok":true`) || !strings.Contains(body, `"balance":1234`) {
+		t.Fatalf("single refresh status=%d body=%s", response.StatusCode, body)
 	}
 }
 
@@ -310,15 +338,57 @@ func TestListAccountsCachesUpstreamUntilForcedRefresh(t *testing.T) {
 	service := &Service{upstream: up}
 
 	request := httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil)
-	service.listAccounts(httptest.NewRecorder(), request)
-	service.listAccounts(httptest.NewRecorder(), request)
+	first := httptest.NewRecorder()
+	service.listAccounts(first, request)
+	second := httptest.NewRecorder()
+	service.listAccounts(second, request)
 	if got := checkinCalls.Load(); got != 1 {
 		t.Fatalf("normal account reads made %d upstream check-in calls, want 1", got)
 	}
+	if first.Header().Get("X-Admin-Cache") != "miss" || second.Header().Get("X-Admin-Cache") != "hit" {
+		t.Fatalf("cache headers = first %q second %q", first.Header().Get("X-Admin-Cache"), second.Header().Get("X-Admin-Cache"))
+	}
 	forced := httptest.NewRequest(http.MethodGet, "/admin/api/accounts?refresh=1", nil)
-	service.listAccounts(httptest.NewRecorder(), forced)
+	forcedResponse := httptest.NewRecorder()
+	service.listAccounts(forcedResponse, forced)
 	if got := checkinCalls.Load(); got != 2 {
 		t.Fatalf("forced account read made %d upstream check-in calls, want 2", got)
+	}
+	if forcedResponse.Header().Get("X-Admin-Cache") != "miss" {
+		t.Fatalf("forced cache header = %q, want miss", forcedResponse.Header().Get("X-Admin-Cache"))
+	}
+}
+
+func TestRefreshAccountsKeepsCacheWhenAllUpstreamAccountsFail(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"upstream unavailable"}`)
+	}))
+	defer remote.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = remote.URL
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Upstream.LoginTimeout = time.Second
+	cfg.Checkin.Path = "/api/checkin"
+	up, err := upstream.NewWithAccounts(cfg, []upstream.AccountCredential{{
+		ID: "account-one", Identifier: "one@example.test", Password: "pw", Enabled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{
+		upstream:        up,
+		accountCache:    []byte(`{"accounts":[{"id":"account-one","balance":1234}]}`),
+		accountCachedAt: time.Now().Add(-upstreamCacheTTL),
+	}
+	old := append([]byte(nil), service.accountCache...)
+	if _, err := service.refreshAccounts(context.Background(), true); err == nil {
+		t.Fatal("refreshAccounts() error = nil, want an upstream failure")
+	}
+	if string(service.accountCache) != string(old) {
+		t.Fatalf("failed refresh replaced cached accounts: got %s want %s", service.accountCache, old)
 	}
 }
 

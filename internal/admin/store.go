@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"clodesen2api/internal/upstream"
 )
@@ -115,6 +116,39 @@ func (s *AccountStore) SetStrategy(strategy string) error {
 	return nil
 }
 
+// UpdateRuntimeState persists a state change learned from an upstream
+// response. It intentionally does not alter credentials, so an automatic
+// cooldown cannot overwrite a password or identifier update.
+func (s *AccountStore) UpdateRuntimeState(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.accounts {
+		if s.accounts[index].ID != accountID {
+			continue
+		}
+		oldEnabled := s.accounts[index].Enabled
+		oldCooldown := s.accounts[index].CooldownUntil
+		oldReason := s.accounts[index].CooldownReason
+		s.accounts[index].Enabled = enabled
+		if cooldownUntil == nil {
+			s.accounts[index].CooldownUntil = nil
+			s.accounts[index].CooldownReason = ""
+		} else {
+			until := cooldownUntil.UTC()
+			s.accounts[index].CooldownUntil = &until
+			s.accounts[index].CooldownReason = strings.TrimSpace(cooldownReason)
+		}
+		if err := s.writeLocked(); err != nil {
+			s.accounts[index].Enabled = oldEnabled
+			s.accounts[index].CooldownUntil = oldCooldown
+			s.accounts[index].CooldownReason = oldReason
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("account %q not found", accountID)
+}
+
 func (s *AccountStore) writeLocked() error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -154,7 +188,6 @@ func validateCredentials(accounts []upstream.AccountCredential) error {
 	}
 	ids := make(map[string]struct{}, len(accounts))
 	identifiers := make(map[string]struct{}, len(accounts))
-	enabled := false
 	for _, account := range accounts {
 		if strings.TrimSpace(account.ID) == "" || strings.TrimSpace(account.Identifier) == "" || strings.TrimSpace(account.Password) == "" {
 			return errors.New("account id, identifier, and password are required")
@@ -168,10 +201,6 @@ func validateCredentials(accounts []upstream.AccountCredential) error {
 		}
 		ids[account.ID] = struct{}{}
 		identifiers[key] = struct{}{}
-		enabled = enabled || account.Enabled
-	}
-	if len(accounts) > 0 && !enabled {
-		return errors.New("at least one account must be enabled")
 	}
 	return nil
 }

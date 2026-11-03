@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"clodesen2api/internal/config"
 )
@@ -154,15 +155,75 @@ func TestCheckinResultDecodesUpstreamFields(t *testing.T) {
 	}
 }
 
-func TestCheckinResultDecodesCreditBreakdownAliases(t *testing.T) {
-	raw := []byte(`{"balance":120,"credits":{"permanent_credits":80,"temporaryBalance":"40"}}`)
-	var res CheckinResult
-	if err := json.Unmarshal(raw, &res); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+func TestRefreshAccountStatusDoesNotReadUnsupportedCreditBreakdown(t *testing.T) {
+	var accountCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/checkin":
+			_, _ = w.Write([]byte(`{"enabled":true,"checkedIn":true,"balance":120}`))
+		case "/api/account":
+			accountCalls++
+			_, _ = w.Write([]byte(`{"account":{"balance":120}}`))
+		case "/api/limited-redemption":
+			_, _ = w.Write([]byte(`{"enabled":true,"remaining":2,"limit":3}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	up := newTestUpstream(t, server.URL)
+	status := up.refreshAccountStatus(context.Background(), AccountStatus{ID: "test", Identifier: "test@example.test", Enabled: true})
+	if status.Balance == nil || *status.Balance != 120 || accountCalls != 0 {
+		t.Fatalf("status=%+v account endpoint calls=%d, want total balance without split lookup", status, accountCalls)
 	}
-	res.PermanentBalance, res.TemporaryBalance = parseCreditBreakdown(raw)
-	if res.PermanentBalance == nil || *res.PermanentBalance != 80 || res.TemporaryBalance == nil || *res.TemporaryBalance != 40 {
-		t.Fatalf("unexpected credit breakdown: permanent=%v temporary=%v", res.PermanentBalance, res.TemporaryBalance)
+}
+
+func TestRefreshAccountStatusReadsTemporaryBanAccountFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/checkin":
+			_, _ = w.Write([]byte(`{"enabled":true,"checkedIn":true,"balance":321}`))
+		case "/api/limited-redemption":
+			_, _ = w.Write([]byte(`{"enabled":true,"remaining":4,"limit":10}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	up := newTestUpstream(t, server.URL)
+	up.enabled = true
+	up.accountID = "temporary-ban"
+	up.cooldownUntil = make(map[*Upstream]time.Time)
+	up.cooldownReason = make(map[*Upstream]string)
+	until := time.Now().Add(time.Hour).UTC()
+	up.cooldownUntil[up] = until
+	up.cooldownReason[up] = cooldownReasonTemporaryBan
+
+	status := up.refreshAccountStatus(context.Background(), AccountStatus{ID: up.accountID, Identifier: "test@example.test", Enabled: true})
+	if status.Balance == nil || *status.Balance != 321 || status.CheckedIn == nil || !*status.CheckedIn ||
+		status.RedemptionRemaining == nil || *status.RedemptionRemaining != 4 || status.CooldownReason != cooldownReasonTemporaryBan {
+		t.Fatalf("status=%+v, want readable fields and preserved temporary ban", status)
+	}
+}
+
+func TestCheckinReadsNestedBalance(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"enabled":true,"checkedIn":true,"account":{"balance":987}}`))
+	}))
+	defer server.Close()
+
+	up := newTestUpstream(t, server.URL)
+	result, err := up.Checkin(context.Background())
+	if err != nil {
+		t.Fatalf("Checkin() error = %v", err)
+	}
+	if !result.BalanceKnown || result.Balance != 987 {
+		t.Fatalf("balance = %+v, want known balance 987", result)
 	}
 }
 

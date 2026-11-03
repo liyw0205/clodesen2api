@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -40,7 +41,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("[fatal] 初始化上游账号池失败: %v", err)
 	}
-	usageStats := usage.New()
+	up.SetAccountStateRecorder(accountStore.UpdateRuntimeState)
+	usageStats, usageErr := usage.NewPersistent(filepath.Join(filepath.Dir(cfg.Admin.TokenFile), "usage.json"))
+	if usageErr != nil {
+		log.Printf("[usage] 加载持久化调用统计失败，将从空统计开始: %v", usageErr)
+	}
 	adminHandler := admin.NewHandlerWithConfig(up, accountStore, token, cfg.Admin.TokenFile, cfg, usageStats)
 
 	// 启动时预登录一次，避免首个请求卡在登录超时上
@@ -55,6 +60,20 @@ func main() {
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	defer rootCancel()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(rootCtx, 35*time.Second)
+				up.CalibrateCreditCooldowns(ctx)
+				cancel()
+			case <-rootCtx.Done():
+				return
+			}
+		}
+	}()
 
 	// 启动每日签到调度（仅在配置了账号密码且 checkin.enable=true 时）
 	if cfg.Checkin.Enable && up.AccountCount() > 0 {

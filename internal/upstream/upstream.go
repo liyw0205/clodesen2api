@@ -41,20 +41,32 @@ type Upstream struct {
 	accountID   string
 	enabled     bool
 
-	accounts       []*Upstream
-	poolMode       bool
-	strategy       string
-	poolMu         sync.Mutex
-	nextAccount    int
-	cooldownUntil  map[*Upstream]time.Time
-	creditMu       sync.RWMutex
-	creditRecorder func(CreditUsageRecord)
-	creditPricing  map[string]int64
+	accounts             []*Upstream
+	owner                *Upstream
+	poolMode             bool
+	strategy             string
+	poolMu               sync.Mutex
+	nextAccount          int
+	cooldownUntil        map[*Upstream]time.Time
+	cooldownReason       map[*Upstream]string
+	accountStateRecorder func(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error
+	creditMu             sync.RWMutex
+	creditRecorder       func(CreditUsageRecord)
+	creditPricing        map[string]int64
+	redemptionRecorder   func(string, RedemptionResult)
 }
 
 const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
-const insufficientCreditsCooldown = 30 * time.Minute
+const (
+	insufficientCreditsCooldown        = 30 * time.Minute
+	insufficientCreditsThreshold int64 = 100
+)
+
+const (
+	cooldownReasonInsufficientCredits = "insufficient_credits"
+	cooldownReasonTemporaryBan        = "temporary_ban"
+)
 
 // New 构造上游客户端。cookiejar 用来自动保存 set-cookie。
 func New(cfg *config.Config) (*Upstream, error) {
@@ -79,10 +91,12 @@ func New(cfg *config.Config) (*Upstream, error) {
 
 // AccountCredential is the persisted login data for one upstream account.
 type AccountCredential struct {
-	ID         string `json:"id"`
-	Identifier string `json:"identifier"`
-	Password   string `json:"password"`
-	Enabled    bool   `json:"enabled"`
+	ID             string     `json:"id"`
+	Identifier     string     `json:"identifier"`
+	Password       string     `json:"password"`
+	Enabled        bool       `json:"enabled"`
+	CooldownUntil  *time.Time `json:"cooldownUntil,omitempty"`
+	CooldownReason string     `json:"cooldownReason,omitempty"`
 }
 
 // ConfiguredAccounts parses legacy single-account and multi-account config.
@@ -115,9 +129,10 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 
 	pool := &Upstream{
 		cfg: cfg, poolMode: true,
-		strategy:      strategy,
-		cooldownUntil: make(map[*Upstream]time.Time),
-		creditPricing: make(map[string]int64),
+		strategy:       strategy,
+		cooldownUntil:  make(map[*Upstream]time.Time),
+		cooldownReason: make(map[*Upstream]string),
+		creditPricing:  make(map[string]int64),
 	}
 	for _, credential := range credentials {
 		credential.Identifier = strings.TrimSpace(credential.Identifier)
@@ -134,10 +149,23 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 		}
 		account.accountID = credential.ID
 		account.enabled = credential.Enabled
+		account.owner = pool
 		account.creditPricing = make(map[string]int64)
 		pool.accounts = append(pool.accounts, account)
+		if credential.CooldownUntil != nil && credential.CooldownUntil.After(time.Now()) {
+			pool.cooldownUntil[account] = credential.CooldownUntil.UTC()
+			pool.cooldownReason[account] = normalizeCooldownReason(credential.CooldownReason)
+		}
 	}
 	return pool, nil
+}
+
+// SetAccountStateRecorder persists runtime state changes such as an upstream
+// restriction cooldown. It is optional so upstream remains usable standalone.
+func (u *Upstream) SetAccountStateRecorder(recorder func(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error) {
+	u.poolMu.Lock()
+	u.accountStateRecorder = recorder
+	u.poolMu.Unlock()
 }
 
 // ApplyRuntimeConfig updates settings changed from the management panel while
@@ -183,6 +211,20 @@ func (u *Upstream) SetCreditUsageRecorder(recorder func(CreditUsageRecord)) {
 		account.creditMu.Lock()
 		account.creditRecorder = recorder
 		account.creditPricing = pricing
+		account.creditMu.Unlock()
+	}
+}
+
+// SetRedemptionRecorder receives every account redemption result, including
+// redemptions triggered by the scheduled task.
+func (u *Upstream) SetRedemptionRecorder(recorder func(string, RedemptionResult)) {
+	accounts := u.accountsSnapshot()
+	u.creditMu.Lock()
+	u.redemptionRecorder = recorder
+	u.creditMu.Unlock()
+	for _, account := range accounts {
+		account.creditMu.Lock()
+		account.redemptionRecorder = recorder
 		account.creditMu.Unlock()
 	}
 }
@@ -268,16 +310,22 @@ func newSession(cfg *config.Config) (*Upstream, error) {
 	mainTimeout := cfg.Upstream.RequestTimeout
 	if mainTimeout > 0 {
 		return &Upstream{
-			cfg:         cfg,
-			httpClient:  &http.Client{Transport: transport, Jar: jar, Timeout: mainTimeout},
-			loginClient: &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
+			cfg:            cfg,
+			enabled:        true,
+			cooldownUntil:  make(map[*Upstream]time.Time),
+			cooldownReason: make(map[*Upstream]string),
+			httpClient:     &http.Client{Transport: transport, Jar: jar, Timeout: mainTimeout},
+			loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 		}, nil
 	}
 	// request_timeout=0 表示不限超时（流式）
 	return &Upstream{
-		cfg:         cfg,
-		httpClient:  &http.Client{Transport: transport, Jar: jar},
-		loginClient: &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
+		cfg:            cfg,
+		enabled:        true,
+		cooldownUntil:  make(map[*Upstream]time.Time),
+		cooldownReason: make(map[*Upstream]string),
+		httpClient:     &http.Client{Transport: transport, Jar: jar},
+		loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 	}, nil
 }
 
@@ -342,10 +390,11 @@ func (u *Upstream) Login(ctx context.Context) error {
 		var loginErrors []error
 		successes := 0
 		for i, account := range accounts {
-			if !account.enabled {
+			if !account.enabled || !u.accountAvailable(account) {
 				continue
 			}
 			if err := account.Login(ctx); err != nil {
+				u.applyAccountRetryError(account, err)
 				loginErrors = append(loginErrors, fmt.Errorf("account %d: %w", i+1, err))
 				continue
 			}
@@ -399,7 +448,26 @@ func (u *Upstream) Login(ctx context.Context) error {
 
 	if resp.StatusCode/100 != 2 {
 		u.loggedIn = false
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, respBody); ok {
+			retryable := &safeAccountRetryError{
+				err:            fmt.Errorf("login failed: upstream status %d, body=%s", resp.StatusCode, string(respBody)),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+			u.restrictionOwner().applyAccountRetryError(u, retryable)
+			return retryable
+		}
 		return fmt.Errorf("login failed: upstream status %d, body=%s", resp.StatusCode, string(respBody))
+	}
+	if restriction, ok := detectAccountRestriction(resp.StatusCode, respBody); ok {
+		u.loggedIn = false
+		retryable := &safeAccountRetryError{
+			err:            fmt.Errorf("login rejected by upstream: body=%s", string(respBody)),
+			cooldownUntil:  restriction.cooldownUntil,
+			disableAccount: restriction.disableAccount,
+		}
+		u.restrictionOwner().applyAccountRetryError(u, retryable)
+		return retryable
 	}
 
 	// 校验响应体不是错误 JSON（有些上游 200 也返回 {"error":...}）
@@ -485,6 +553,13 @@ func (u *Upstream) allocateImageRoute(ctx context.Context, host, openAIBaseURL s
 		return imageRoute{targetURL: openAIBaseURL + request.Path}, nil
 	}
 	if resp.StatusCode/100 != 2 {
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
+			return imageRoute{}, &safeAccountRetryError{
+				err:            fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body)),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+		}
 		return imageRoute{}, fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body))
 	}
 
@@ -530,7 +605,16 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request o
 		if u.poolMode {
 			return &NoAccountAvailableError{}, false
 		}
+		if !u.accountAvailable(u) {
+			u.poolMu.Lock()
+			retryAfter := time.Until(u.cooldownUntil[u])
+			u.poolMu.Unlock()
+			return &NoAccountAvailableError{RetryAfter: retryAfter}, false
+		}
 		err, wrote, insufficient := u.forwardSingle(ctx, w, request)
+		if err != nil {
+			u.applyAccountRetryError(u, err)
+		}
 		if insufficient != nil {
 			insufficient.writeTo(w)
 			return nil, true
@@ -568,11 +652,25 @@ func (e *NoAccountAvailableError) Error() string {
 }
 
 type safeAccountRetryError struct {
-	err error
+	err            error
+	response       *bufferedResponse
+	cooldownUntil  *time.Time
+	disableAccount bool
 }
 
 func (e *safeAccountRetryError) Error() string { return e.err.Error() }
 func (e *safeAccountRetryError) Unwrap() error { return e.err }
+
+func wrapSafeAccountRetryError(prefix string, err error) error {
+	retryable := &safeAccountRetryError{err: err}
+	var source *safeAccountRetryError
+	if errors.As(err, &source) {
+		retryable.response = source.response
+		retryable.cooldownUntil = source.cooldownUntil
+		retryable.disableAccount = source.disableAccount
+	}
+	return fmt.Errorf("%s: %w", prefix, retryable)
+}
 
 func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, request openai.Request) (error, bool) {
 	candidates, retryAfter := u.selectAccounts()
@@ -581,6 +679,7 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 	}
 
 	var insufficient *bufferedResponse
+	var retryableResponse *bufferedResponse
 	var lastErr error
 	attempted := 0
 	for _, candidate := range candidates {
@@ -599,6 +698,15 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 			lastErr = err
 			var retryable *safeAccountRetryError
 			if errors.As(err, &retryable) {
+				u.applyAccountRetryError(candidate.account, err)
+				if retryable.cooldownUntil != nil {
+					log.Printf("[account] account %d restricted; cooling down until %s", candidate.index+1, retryable.cooldownUntil.In(time.Local).Format(time.RFC3339))
+				} else if retryable.disableAccount {
+					log.Printf("[account] account %d restricted without an end time; disabling account", candidate.index+1)
+				}
+				if retryable.response != nil {
+					retryableResponse = retryable.response
+				}
 				continue
 			}
 			return err, false
@@ -609,6 +717,10 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 	}
 	if insufficient != nil {
 		insufficient.writeTo(w)
+		return nil, true
+	}
+	if retryableResponse != nil {
+		retryableResponse.writeTo(w)
 		return nil, true
 	}
 	if attempted == 0 {
@@ -679,15 +791,219 @@ func (u *Upstream) accountAvailable(account *Upstream) bool {
 	return !u.cooldownUntil[account].After(time.Now())
 }
 
-func (u *Upstream) coolDown(account *Upstream) {
+func (u *Upstream) cooldownUntilFor(account *Upstream) *time.Time {
 	u.poolMu.Lock()
+	until := u.cooldownUntil[account]
+	u.poolMu.Unlock()
+	if !until.After(time.Now()) {
+		return nil
+	}
+	until = until.UTC()
+	return &until
+}
+
+func (u *Upstream) cooldownReasonFor(account *Upstream) string {
+	u.poolMu.Lock()
+	until := u.cooldownUntil[account]
+	reason := u.cooldownReason[account]
+	u.poolMu.Unlock()
+	if !until.After(time.Now()) {
+		return ""
+	}
+	return normalizeCooldownReason(reason)
+}
+
+func (u *Upstream) cooldownIsTemporaryBan(account *Upstream) bool {
+	return u.cooldownReasonFor(account) == cooldownReasonTemporaryBan
+}
+
+func (u *Upstream) clearCreditCooldown(account *Upstream) {
+	var recorder func(string, bool, *time.Time, string) error
+	changed := false
+	enabled := false
+	u.poolMu.Lock()
+	if len(u.accounts) == 0 && account == u {
+		if u.cooldownReason[account] == cooldownReasonInsufficientCredits || (u.cooldownReason[account] == "" && u.cooldownUntil[account].After(time.Now())) {
+			delete(u.cooldownUntil, account)
+			delete(u.cooldownReason, account)
+		}
+		u.poolMu.Unlock()
+		return
+	}
+	for _, current := range u.accounts {
+		if current != account {
+			continue
+		}
+		if u.cooldownReason[account] != cooldownReasonInsufficientCredits {
+			break
+		}
+		delete(u.cooldownUntil, account)
+		delete(u.cooldownReason, account)
+		changed = true
+		enabled = current.enabled
+		recorder = u.accountStateRecorder
+		break
+	}
+	u.poolMu.Unlock()
+	if changed && recorder != nil {
+		if err := recorder(account.accountID, enabled, nil, ""); err != nil {
+			log.Printf("[account] clear credit cooldown for account %s failed: %v", account.accountID, err)
+		}
+	}
+}
+
+// CalibrateCreditCooldowns refreshes only accounts cooled down for credits.
+// Temporary bans remain untouched until their upstream end time.
+func (u *Upstream) CalibrateCreditCooldowns(ctx context.Context) {
+	if !u.poolMode {
+		if u.cooldownReasonFor(u) == cooldownReasonInsufficientCredits {
+			status := AccountStatus{ID: u.accountID, Identifier: u.cfg.Auth.Identifier, Enabled: u.enabled, RefreshedAt: time.Now()}
+			_ = u.refreshAccountStatus(ctx, status)
+		}
+		return
+	}
+	for _, account := range u.accountsSnapshot() {
+		if u.cooldownReasonFor(account) != cooldownReasonInsufficientCredits {
+			continue
+		}
+		status := AccountStatus{ID: account.accountID, Identifier: account.cfg.Auth.Identifier, Enabled: account.enabled, RefreshedAt: time.Now()}
+		_ = account.refreshAccountStatus(ctx, status)
+	}
+}
+
+func normalizeCooldownReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case cooldownReasonTemporaryBan:
+		return cooldownReasonTemporaryBan
+	case cooldownReasonInsufficientCredits:
+		return cooldownReasonInsufficientCredits
+	default:
+		// Keep legacy records usable; a newly observed restriction overwrites
+		// this value with temporary_ban.
+		return cooldownReasonInsufficientCredits
+	}
+}
+
+func (u *Upstream) restrictionOwner() *Upstream {
+	if u.owner != nil {
+		return u.owner
+	}
+	return u
+}
+
+// applyAccountRetryError turns a restriction response into account state. The
+// parent pool owns the cooldown map even when the HTTP request ran on a child
+// account session.
+func (u *Upstream) applyAccountRetryError(account *Upstream, err error) bool {
+	var retryable *safeAccountRetryError
+	if !errors.As(err, &retryable) {
+		return false
+	}
+	owner := u.restrictionOwner()
+	if retryable.cooldownUntil != nil {
+		owner.coolDownUntil(account, *retryable.cooldownUntil, cooldownReasonTemporaryBan)
+		return true
+	}
+	if retryable.disableAccount {
+		owner.disableAccount(account)
+		return true
+	}
+	return false
+}
+
+func (u *Upstream) coolDown(account *Upstream) {
+	u.coolDownUntil(account, time.Now().Add(insufficientCreditsCooldown), cooldownReasonInsufficientCredits)
+}
+
+func (u *Upstream) coolDownUntil(account *Upstream, until time.Time, reason string) {
+	if !until.After(time.Now()) {
+		return
+	}
+	until = until.UTC()
+	reason = normalizeCooldownReason(reason)
+	var recorder func(string, bool, *time.Time, string) error
+	changed := false
+	enabled := false
+	effectiveUntil := until
+	effectiveReason := reason
+	u.poolMu.Lock()
+	if len(u.accounts) == 0 && account == u {
+		previous := u.cooldownUntil[account]
+		previousReason := u.cooldownReason[account]
+		if previousReason == "" && previous.After(time.Now()) {
+			previousReason = cooldownReasonInsufficientCredits
+		}
+		if until.After(previous) {
+			u.cooldownUntil[account] = until
+			effectiveUntil = until
+		}
+		if reason == cooldownReasonTemporaryBan || previousReason != cooldownReasonTemporaryBan {
+			u.cooldownReason[account] = reason
+		} else {
+			u.cooldownReason[account] = previousReason
+		}
+		effectiveReason = normalizeCooldownReason(u.cooldownReason[account])
+		changed = until.After(previous) || effectiveReason != previousReason
+		u.poolMu.Unlock()
+		return
+	}
 	for _, current := range u.accounts {
 		if current == account {
-			u.cooldownUntil[account] = time.Now().Add(insufficientCreditsCooldown)
+			previous := u.cooldownUntil[account]
+			previousReason := u.cooldownReason[account]
+			if previousReason == "" {
+				previousReason = cooldownReasonInsufficientCredits
+			}
+			if until.After(previous) {
+				u.cooldownUntil[account] = until
+				effectiveUntil = until
+			} else {
+				effectiveUntil = previous
+			}
+			if reason == cooldownReasonTemporaryBan || previousReason != cooldownReasonTemporaryBan {
+				u.cooldownReason[account] = reason
+			} else {
+				u.cooldownReason[account] = previousReason
+			}
+			effectiveReason = normalizeCooldownReason(u.cooldownReason[account])
+			changed = until.After(previous) || effectiveReason != previousReason
+			if changed {
+				enabled = current.enabled
+				recorder = u.accountStateRecorder
+			}
 			break
 		}
 	}
 	u.poolMu.Unlock()
+	if changed && recorder != nil {
+		if err := recorder(account.accountID, enabled, &effectiveUntil, effectiveReason); err != nil {
+			log.Printf("[account] persist cooldown for account %s failed: %v", account.accountID, err)
+		}
+	}
+}
+
+func (u *Upstream) disableAccount(account *Upstream) {
+	var recorder func(string, bool, *time.Time, string) error
+	changed := false
+	u.poolMu.Lock()
+	for _, current := range u.accounts {
+		if current == account {
+			if current.enabled {
+				changed = true
+			}
+			current.enabled = false
+			delete(u.cooldownUntil, current)
+			delete(u.cooldownReason, current)
+			recorder = u.accountStateRecorder
+			break
+		}
+	}
+	u.poolMu.Unlock()
+	if changed && recorder != nil {
+		if err := recorder(account.accountID, false, nil, ""); err != nil {
+			log.Printf("[account] persist disabled state for account %s failed: %v", account.accountID, err)
+		}
+	}
 }
 
 func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, request openai.Request) (error, bool, *bufferedResponse) {
@@ -696,7 +1012,7 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 
 	// 首次/未登录先登录
 	if err := u.ensureLogin(ctx); err != nil {
-		return fmt.Errorf("ensure login: %w", &safeAccountRetryError{err: err}), false, nil
+		return wrapSafeAccountRetryError("ensure login", err), false, nil
 	}
 
 	doForward := func() (*http.Response, error) {
@@ -705,7 +1021,7 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 			var err error
 			route, err = u.allocateImageRoute(ctx, host, openAIBaseURL, request)
 			if err != nil {
-				return nil, &safeAccountRetryError{err: err}
+				return nil, err
 			}
 		}
 
@@ -741,7 +1057,7 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 
 	resp, err := forwardWithRouteRetry()
 	if err != nil {
-		return fmt.Errorf("forward request: %w", err), false, nil
+		return wrapSafeAccountRetryError("forward request", err), false, nil
 	}
 
 	// 401 自动重新登录后重试一次
@@ -753,12 +1069,12 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		u.mu.Unlock()
 
 		if err := u.Login(ctx); err != nil {
-			return fmt.Errorf("relogin on 401: %w", &safeAccountRetryError{err: err}), false, nil
+			return wrapSafeAccountRetryError("relogin on 401", err), false, nil
 		}
 		// 再转一次
 		resp, err = forwardWithRouteRetry()
 		if err != nil {
-			return fmt.Errorf("forward after relogin: %w", err), false, nil
+			return wrapSafeAccountRetryError("forward after relogin", err), false, nil
 		}
 	}
 
@@ -768,10 +1084,24 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		body, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return fmt.Errorf("read upstream body: %w", readErr), false, nil
+			return wrapSafeAccountRetryError("read upstream body", readErr), false, nil
+		}
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
+			return &safeAccountRetryError{
+				err:            fmt.Errorf("upstream account restricted: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body))),
+				response:       &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body},
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}, false, nil
 		}
 		if insufficientCredits(resp.StatusCode, body) {
 			return nil, false, &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
+		}
+		if retryableUpstreamStatus(resp.StatusCode) {
+			return &safeAccountRetryError{
+				err:      fmt.Errorf("upstream returned retryable status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+				response: &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body},
+			}, false, nil
 		}
 		// 上游生图接口返回的图片地址是站内相对路径（如
 		// /api/generated-images/xxx），转发前改写成绝对地址，否则客户端拿到
@@ -801,7 +1131,27 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 	prefix, prefixErr := readSSEPrefix(reader)
 	if prefixErr != nil && !errors.Is(prefixErr, io.EOF) {
 		_ = resp.Body.Close()
-		return fmt.Errorf("read upstream stream: %w", prefixErr), false, nil
+		return wrapSafeAccountRetryError("read upstream stream", prefixErr), false, nil
+	}
+	if restriction, ok := detectAccountRestriction(resp.StatusCode, prefix); ok {
+		body, _ := io.ReadAll(reader)
+		_ = resp.Body.Close()
+		return &safeAccountRetryError{
+			err:           fmt.Errorf("upstream account restricted: status=%d", resp.StatusCode),
+			response:      &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: append(prefix, body...)},
+			cooldownUntil: restriction.cooldownUntil, disableAccount: restriction.disableAccount,
+		}, false, nil
+	}
+	if retryableUpstreamStatus(resp.StatusCode) {
+		body, _ := io.ReadAll(reader)
+		_ = resp.Body.Close()
+		return &safeAccountRetryError{
+			err: fmt.Errorf("upstream returned retryable status %d", resp.StatusCode),
+			response: &bufferedResponse{
+				header: resp.Header.Clone(), status: resp.StatusCode,
+				body: append(prefix, body...),
+			},
+		}, false, nil
 	}
 	if insufficientCredits(resp.StatusCode, prefix) {
 		body, _ := io.ReadAll(reader)
@@ -876,6 +1226,131 @@ func insufficientCredits(status int, body []byte) bool {
 	return false
 }
 
+type accountRestriction struct {
+	cooldownUntil  *time.Time
+	disableAccount bool
+}
+
+func detectAccountRestriction(status int, body []byte) (accountRestriction, bool) {
+	var payload map[string]json.RawMessage
+	_ = json.Unmarshal(body, &payload)
+
+	readString := func(values map[string]json.RawMessage, keys ...string) string {
+		for _, key := range keys {
+			raw, ok := values[key]
+			if !ok {
+				continue
+			}
+			var value string
+			if json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+			var number json.Number
+			if json.Unmarshal(raw, &number) == nil && strings.TrimSpace(number.String()) != "" {
+				return number.String()
+			}
+		}
+		return ""
+	}
+
+	code := readString(payload, "code", "errorCode", "error_code")
+	message := readString(payload, "message", "detail")
+	untilText := readString(payload, "bannedUntil", "banned_until", "banUntil", "ban_until", "blockedUntil", "blocked_until", "suspendedUntil", "suspended_until", "restrictedUntil", "restricted_until", "restrictionUntil", "restriction_until")
+	if rawError, ok := payload["error"]; ok {
+		var nested map[string]json.RawMessage
+		if json.Unmarshal(rawError, &nested) == nil {
+			if code == "" {
+				code = readString(nested, "code", "errorCode", "error_code")
+			}
+			if message == "" {
+				message = readString(nested, "message", "detail")
+			}
+			if untilText == "" {
+				untilText = readString(nested, "bannedUntil", "banned_until", "banUntil", "ban_until", "blockedUntil", "blocked_until", "suspendedUntil", "suspended_until", "restrictedUntil", "restricted_until", "restrictionUntil", "restriction_until")
+			}
+		} else if message == "" {
+			_ = json.Unmarshal(rawError, &message)
+		}
+	}
+
+	lowerCode := strings.ToLower(strings.TrimSpace(code))
+	lowerMessage := strings.ToLower(strings.TrimSpace(message))
+	bodyText := strings.ToLower(string(body))
+	matched := accountRestrictionCode(lowerCode) || accountRestrictionMessage(lowerMessage)
+	if !matched && status == http.StatusForbidden {
+		matched = strings.Contains(bodyText, "banneduntil") || strings.Contains(bodyText, "account_restricted")
+	}
+	if !matched {
+		return accountRestriction{}, false
+	}
+
+	if until, ok := parseRestrictionTime(untilText); ok && until.After(time.Now()) {
+		return accountRestriction{cooldownUntil: &until}, true
+	}
+	return accountRestriction{disableAccount: true}, true
+}
+
+func accountRestrictionCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"account_restricted", "account_banned", "account_suspended", "account_blocked", "account_disabled",
+		"account_ban", "account_suspend", "user_banned", "user_suspended", "forbidden_account",
+		"banned", "suspended", "blocked", "temporary_ban", "temporarily_banned", "temp_ban",
+	} {
+		if code == marker {
+			return true
+		}
+	}
+	return strings.Contains(code, "account") && (strings.Contains(code, "ban") ||
+		strings.Contains(code, "suspend") || strings.Contains(code, "restrict") || strings.Contains(code, "block"))
+}
+
+func accountRestrictionMessage(message string) bool {
+	if message == "" {
+		return false
+	}
+	englishAccount := strings.Contains(message, "account") && (strings.Contains(message, "ban") ||
+		strings.Contains(message, "suspend") || strings.Contains(message, "restrict") || strings.Contains(message, "block"))
+	chineseAccount := strings.Contains(message, "账号") && (strings.Contains(message, "封") ||
+		strings.Contains(message, "限制") || strings.Contains(message, "冻结") || strings.Contains(message, "停用"))
+	return englishAccount || chineseAccount
+}
+
+func parseRestrictionTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if unix, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if unix > 100000000000 {
+			unix /= 1000
+		}
+		parsed := time.Unix(unix, 0)
+		return parsed, !parsed.IsZero()
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+	} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, true
+		}
+		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func retryableUpstreamStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
+}
+
 type flushingWriter struct {
 	writer  io.Writer
 	flusher http.Flusher
@@ -889,18 +1364,16 @@ func (w flushingWriter) Write(data []byte) (int, error) {
 
 // CheckinResult 解析 /api/checkin 的响应字段，用于日志和幂等判断。
 type CheckinResult struct {
-	Enabled          bool   `json:"enabled"`
-	CheckedIn        bool   `json:"checkedIn"`
-	Reward           int64  `json:"reward"`
-	Date             string `json:"date"`
-	Balance          int64  `json:"balance"`
-	BalanceKnown     bool   `json:"-"`
-	PermanentBalance *int64 `json:"permanentBalance,omitempty"`
-	TemporaryBalance *int64 `json:"temporaryBalance,omitempty"`
-	ValidityDays     int64  `json:"validityDays"`
-	CurrentStreak    int64  `json:"currentStreak"`
-	MakeupChances    int64  `json:"makeupChances"`
-	AlreadyChecked   bool   `json:"-"` // 本次调用前就已签到
+	Enabled        bool   `json:"enabled"`
+	CheckedIn      bool   `json:"checkedIn"`
+	Reward         int64  `json:"reward"`
+	Date           string `json:"date"`
+	Balance        int64  `json:"balance"`
+	BalanceKnown   bool   `json:"-"`
+	ValidityDays   int64  `json:"validityDays"`
+	CurrentStreak  int64  `json:"currentStreak"`
+	MakeupChances  int64  `json:"makeupChances"`
+	AlreadyChecked bool   `json:"-"` // 本次调用前就已签到
 }
 
 // Checkin 执行一次签到。上游接口分两步：
@@ -922,6 +1395,9 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 			if err != nil {
 				checkinErrors = append(checkinErrors, fmt.Errorf("account %d: %w", i+1, err))
 				continue
+			}
+			if account.owner != nil {
+				account.owner.clearCreditCooldown(account)
 			}
 			if !gotResult {
 				result = accountResult
@@ -954,6 +1430,7 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 	}
 	if state.CheckedIn {
 		state.AlreadyChecked = true
+		u.clearCreditCooldown(u)
 		return state, nil
 	}
 	if !state.Enabled {
@@ -975,7 +1452,36 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 	if !fresh.CheckedIn && fresh.Reward == 0 {
 		return fresh, fmt.Errorf("checkin returned no reward")
 	}
+	u.clearCreditCooldown(u)
 	return fresh, nil
+}
+
+// CheckinAccount performs the two-step check-in flow for one configured account.
+func (u *Upstream) CheckinAccount(ctx context.Context, accountID string) (CheckinResult, error) {
+	accounts := u.accountsSnapshot()
+	if len(accounts) == 0 {
+		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+			return CheckinResult{}, errors.New("未配置上游账号")
+		}
+		if accountID != "" && accountID != u.accountID {
+			return CheckinResult{}, errors.New("账号不存在")
+		}
+		return u.Checkin(ctx)
+	}
+	for _, account := range accounts {
+		if account.accountID != accountID {
+			continue
+		}
+		if !account.enabled {
+			return CheckinResult{}, errors.New("账号已停用")
+		}
+		result, err := account.Checkin(ctx)
+		if err == nil {
+			u.restrictionOwner().clearCreditCooldown(account)
+		}
+		return result, err
+	}
+	return CheckinResult{}, errors.New("账号不存在")
 }
 
 // checkinOnce 发一次签到相关请求；withMonth=true 时附带 month 参数（查询用）。
@@ -1021,19 +1527,54 @@ func (u *Upstream) checkinOnce(ctx context.Context, method, host string, withMon
 	}
 
 	if resp.StatusCode/100 != 2 {
+		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
+			retryable := &safeAccountRetryError{
+				err:            fmt.Errorf("checkin %s failed: status=%d body=%s", method, resp.StatusCode, string(body)),
+				cooldownUntil:  restriction.cooldownUntil,
+				disableAccount: restriction.disableAccount,
+			}
+			u.restrictionOwner().applyAccountRetryError(u, retryable)
+			return res, retryable
+		}
 		return res, fmt.Errorf("checkin %s failed: status=%d body=%s", method, resp.StatusCode, string(body))
+	}
+	if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
+		retryable := &safeAccountRetryError{
+			err:            fmt.Errorf("checkin %s rejected by upstream: body=%s", method, string(body)),
+			cooldownUntil:  restriction.cooldownUntil,
+			disableAccount: restriction.disableAccount,
+		}
+		u.restrictionOwner().applyAccountRetryError(u, retryable)
+		return res, retryable
 	}
 	if err := json.Unmarshal(body, &res); err != nil {
 		return res, fmt.Errorf("decode checkin response: %w (body=%s)", err, string(body))
 	}
-	res.PermanentBalance, res.TemporaryBalance = parseCreditBreakdown(body)
 	var balanceField struct {
-		Balance *int64 `json:"balance"`
+		Balance      *int64 `json:"balance"`
+		BalanceAfter *int64 `json:"balanceAfter"`
+		Account      struct {
+			Balance      *int64 `json:"balance"`
+			BalanceAfter *int64 `json:"balanceAfter"`
+		} `json:"account"`
 	}
 	if err := json.Unmarshal(body, &balanceField); err != nil {
 		return res, fmt.Errorf("decode checkin balance: %w", err)
 	}
-	res.BalanceKnown = balanceField.Balance != nil
+	balance := balanceField.Balance
+	if balance == nil {
+		balance = balanceField.BalanceAfter
+	}
+	if balance == nil {
+		balance = balanceField.Account.Balance
+	}
+	if balance == nil {
+		balance = balanceField.Account.BalanceAfter
+	}
+	if balance != nil {
+		res.Balance = *balance
+	}
+	res.BalanceKnown = balance != nil
 	return res, nil
 }
 
