@@ -7,12 +7,11 @@
     strategy: "round_robin",
     deletingID: "",
     toastTimer: 0,
-    refreshTimer: 0,
     availableCredits: null,
     consumedCredits: null,
     accountsRefreshedAt: null,
-    busy: false,
-    analyticsBusy: false,
+    accountsRefreshPromise: null,
+    analyticsRefreshPromise: null,
     analyticsLoaded: false,
     models: [],
     usage: null,
@@ -238,8 +237,9 @@
       button.setAttribute("aria-selected", String(selected));
       button.tabIndex = selected ? 0 : -1;
     });
-    if (analytics && !state.analyticsLoaded) loadAnalytics();
-    if (settings) loadSettings();
+    if (analytics) void loadAnalytics(false, true);
+    else if (settings) void loadSettings();
+    else void refresh(false, false, true);
   }
 
   function setSettingsForm(settings) {
@@ -464,61 +464,64 @@
   }
 
   async function loadAnalytics(force = false, silent = false) {
-    if (state.analyticsBusy || (state.analyticsLoaded && !force && !silent)) return;
-    state.analyticsBusy = true;
-    const button = $("#analytics-refresh");
-    const oldLabel = button.textContent;
-    if (!silent) {
-      button.disabled = true;
-      button.textContent = "读取中";
+    const existing = state.analyticsRefreshPromise;
+    if (existing) {
+      if (!force) return existing;
+      await existing.catch(() => {});
     }
-    $("#model-error").hidden = true;
-    $("#credit-usage-error").hidden = true;
-    try {
-      const results = await Promise.allSettled([
-        api("/admin/api/models" + (force ? "?refresh=1" : "")),
-        api("/admin/api/usage"),
-        api(creditUsagePath(force)),
-      ]);
-      const modelResult = results[0];
-      const usageResult = results[1];
-      const creditUsageResult = results[2];
-      if (modelResult.status === "fulfilled") {
-        state.models = Array.isArray(modelResult.value.data) ? modelResult.value.data : [];
-      } else if (modelResult.reason.message === "登录状态已过期，请重新登录") {
-        throw modelResult.reason;
-      } else {
-        $("#model-error").textContent = modelResult.reason.message;
-        $("#model-error").hidden = false;
-      }
-      if (usageResult.status === "fulfilled") {
-        state.usage = usageResult.value;
-      } else if (usageResult.reason.message === "登录状态已过期，请重新登录") {
-        throw usageResult.reason;
-      } else {
-        showToast(usageResult.reason.message);
-      }
-      if (creditUsageResult.status === "fulfilled") {
-        state.creditUsage = creditUsageResult.value;
-      } else if (creditUsageResult.reason.message === "登录状态已过期，请重新登录") {
-        throw creditUsageResult.reason;
-      } else {
-        $("#credit-usage-error").textContent = creditUsageResult.reason.message;
-        $("#credit-usage-error").hidden = false;
-      }
-      state.analyticsLoaded = true;
-      renderModels();
-      renderUsage();
-      renderCreditModelStats();
-      renderCreditUsage();
-    } catch (error) {
-      if (error.message !== "登录状态已过期，请重新登录") showToast(error.message);
-    } finally {
-      state.analyticsBusy = false;
+    if (state.analyticsLoaded && !force && !silent) return;
+
+    const task = (async () => {
+      const button = $("#analytics-refresh");
+      const oldLabel = button.textContent;
       if (!silent) {
-        button.disabled = false;
-        button.textContent = oldLabel;
+        button.disabled = true;
+        button.textContent = "读取中";
+        $("#model-error").hidden = true;
+        $("#credit-usage-error").hidden = true;
       }
+      try {
+        const results = await Promise.allSettled([
+          api("/admin/api/models" + (force ? "?refresh=1" : "")),
+          api("/admin/api/usage"),
+          api(creditUsagePath(force)),
+        ]);
+        const modelResult = results[0];
+        const usageResult = results[1];
+        const creditUsageResult = results[2];
+        const failed = results.find(result => result.status === "rejected");
+        if (failed) throw failed.reason;
+        const nextModels = Array.isArray(modelResult.value.data) ? modelResult.value.data : [];
+        const nextUsage = usageResult.value;
+        const nextCreditUsage = creditUsageResult.value;
+        state.models = nextModels;
+        state.usage = nextUsage;
+        state.creditUsage = nextCreditUsage;
+        state.analyticsLoaded = true;
+        $("#model-error").hidden = true;
+        $("#credit-usage-error").hidden = true;
+        renderModels();
+        renderUsage();
+        renderCreditModelStats();
+        renderCreditUsage();
+      } catch (error) {
+        if (!silent && error.message !== "登录状态已过期，请重新登录") {
+          $("#model-error").textContent = error.message;
+          $("#model-error").hidden = false;
+          showToast(error.message);
+        }
+      } finally {
+        if (!silent) {
+          button.disabled = false;
+          button.textContent = oldLabel;
+        }
+      }
+    })();
+    state.analyticsRefreshPromise = task;
+    try {
+      return await task;
+    } finally {
+      if (state.analyticsRefreshPromise === task) state.analyticsRefreshPromise = null;
     }
   }
 
@@ -691,46 +694,64 @@
     control.disabled = enabled.length === 0;
   }
 
-  async function refresh(showLoading = true, force = false) {
-    if (state.busy) return;
-    state.busy = true;
-    const button = $("#refresh-button");
-    button.disabled = true;
-    const oldLabel = button.textContent;
-    button.textContent = "读取中";
-    if (showLoading && !state.accounts.length) {
-      $("#loading-state").hidden = false;
-      $("#account-table-wrap").hidden = true;
-      $("#account-cards").hidden = true;
+  async function refresh(showLoading = true, force = false, silent = false) {
+    const existing = state.accountsRefreshPromise;
+    if (existing) {
+      if (!force) return existing;
+      await existing.catch(() => {});
     }
-    $("#error-state").hidden = true;
+
+    const task = (async () => {
+      const button = $("#refresh-button");
+      const oldLabel = button.textContent;
+      if (!silent) {
+        button.disabled = true;
+        button.textContent = "读取中";
+      }
+      if (!silent && showLoading && !state.accounts.length) {
+        $("#loading-state").hidden = false;
+        $("#account-table-wrap").hidden = true;
+        $("#account-cards").hidden = true;
+      }
+      if (!silent) $("#error-state").hidden = true;
+      try {
+        const result = await api("/admin/api/accounts" + (force ? "?refresh=1" : ""));
+        const nextAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+        state.accounts = nextAccounts;
+        state.strategy = result.strategy || "round_robin";
+        state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
+        state.consumedCredits = hasNumber(result.consumedCredits) ? Number(result.consumedCredits) : null;
+        state.accountsRefreshedAt = result.refreshedAt || (state.accounts[0] && state.accounts[0].refreshedAt) || null;
+        const enabledIDs = new Set(state.accounts.filter(account => account.enabled).map(account => account.id));
+        for (const id of Array.from(state.selected)) if (!enabledIDs.has(id)) state.selected.delete(id);
+        if (!state.selectionReady) {
+          state.accounts.filter(account => account.enabled).forEach(account => state.selected.add(account.id));
+          state.selectionReady = true;
+        }
+        render();
+        $("#service-state").dataset.state = "online";
+        $("#service-state span").textContent = "已连接";
+      } catch (error) {
+        if (!silent && error.message !== "登录状态已过期，请重新登录") {
+          $("#error-state").textContent = error.message;
+          $("#error-state").hidden = false;
+        }
+        if (!silent) {
+          $("#service-state").dataset.state = "offline";
+          $("#service-state span").textContent = "连接异常";
+        }
+      } finally {
+        if (!silent) {
+          button.disabled = false;
+          button.textContent = oldLabel;
+        }
+      }
+    })();
+    state.accountsRefreshPromise = task;
     try {
-      const result = await api("/admin/api/accounts" + (force ? "?refresh=1" : ""));
-      state.accounts = Array.isArray(result.accounts) ? result.accounts : [];
-      state.strategy = result.strategy || "round_robin";
-      state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
-      state.consumedCredits = hasNumber(result.consumedCredits) ? Number(result.consumedCredits) : null;
-      state.accountsRefreshedAt = result.refreshedAt || (state.accounts[0] && state.accounts[0].refreshedAt) || null;
-      const enabledIDs = new Set(state.accounts.filter(account => account.enabled).map(account => account.id));
-      for (const id of Array.from(state.selected)) if (!enabledIDs.has(id)) state.selected.delete(id);
-      if (!state.selectionReady) {
-        state.accounts.filter(account => account.enabled).forEach(account => state.selected.add(account.id));
-        state.selectionReady = true;
-      }
-      render();
-      $("#service-state").dataset.state = "online";
-      $("#service-state span").textContent = "已连接";
-    } catch (error) {
-      if (error.message !== "登录状态已过期，请重新登录") {
-        $("#error-state").textContent = error.message;
-        $("#error-state").hidden = false;
-      }
-      $("#service-state").dataset.state = "offline";
-      $("#service-state span").textContent = "连接异常";
+      return await task;
     } finally {
-      state.busy = false;
-      button.disabled = false;
-      button.textContent = oldLabel;
+      if (state.accountsRefreshPromise === task) state.accountsRefreshPromise = null;
     }
   }
 
@@ -859,6 +880,7 @@
         render();
       }
       showToast(result.ok ? "账号状态已刷新" : (result.account && result.account.error) || "账号状态刷新失败");
+      await refresh(false, true, true);
     } catch (error) {
       showToast(error.message);
     } finally {
@@ -959,24 +981,11 @@
         // Load the model catalog and cumulative statistics on the first login,
         // so the analytics view is ready without a manual refresh.
         void loadAnalytics();
-        startRefreshTimer();
       }
     } catch (error) {
       setLogin(false, false);
       loginError.textContent = error.message;
     }
-  }
-
-  function startRefreshTimer() {
-    window.clearInterval(state.refreshTimer);
-    state.refreshTimer = window.setInterval(() => {
-      if (dashboard.hidden) return;
-      void refresh(false, false);
-      if (state.analyticsLoaded) void loadAnalytics(false, true);
-      if (redeemDialog.open) {
-        void loadRedemptionHistory();
-      }
-    }, 30000);
   }
 
   loginForm.addEventListener("submit", async event => {
@@ -994,7 +1003,6 @@
       loginTokenConfirm.value = "";
       setLogin(true, true, false);
       await refresh();
-      startRefreshTimer();
     } catch (error) {
       loginError.textContent = error.message;
     } finally {
@@ -1004,7 +1012,6 @@
 
   $("#logout-button").addEventListener("click", async () => {
     try { await api("/admin/api/session", { method: "DELETE" }); } catch (_) {}
-    window.clearInterval(state.refreshTimer);
     setLogin(true, false, false);
   });
   $("#refresh-button").addEventListener("click", () => refresh(true, true));
