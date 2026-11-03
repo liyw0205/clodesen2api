@@ -32,6 +32,7 @@ type Config struct {
 		Password    string
 		Accounts    string
 		Strategy    string
+		RPM         int
 		AutoRelogin bool
 	}
 	Admin struct {
@@ -67,6 +68,7 @@ type PublicSettings struct {
 	} `json:"upstream"`
 	Auth struct {
 		Strategy    string `json:"strategy"`
+		RPM         int    `json:"rpm"`
 		AutoRelogin bool   `json:"autoRelogin"`
 	} `json:"auth"`
 	Checkin struct {
@@ -105,7 +107,8 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Auth.Identifier, "identifier", "auth", "identifier", "", "登录账号(邮箱/用户名)")
 	flag.StringConfigVar(&c.Auth.Password, "password", "auth", "password", "", "登录密码")
 	flag.StringConfigVar(&c.Auth.Accounts, "accounts", "auth", "accounts", "", "逗号分隔的账号列表，元素格式为 identifier:password")
-	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "round_robin", "账号选择策略：round_robin 或 random")
+	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "round_robin", "账号选择策略：round_robin、random 或 fixed")
+	flag.IntConfigVar(&c.Auth.RPM, "account-rpm", "auth", "rpm", 4, "每个账号允许同时处理的请求数")
 	flag.BoolConfigVar(&c.Auth.AutoRelogin, "auto-relogin", "auth", "auto_relogin", true, "401 时是否自动重新登录")
 	flag.StringConfigVar(&c.Admin.Token, "admin-token", "admin", "token", "", "管理后台访问令牌（首次设置为 6-20 个字符）")
 	flag.StringConfigVar(&c.Admin.TokenFile, "admin-token-file", "admin", "token_file", "data/admin.token", "管理后台令牌持久化文件")
@@ -135,7 +138,10 @@ func (c *Config) PublicSettings() PublicSettings {
 	out.Server.Addr = c.Server.Addr
 	out.Upstream.BaseURL, out.Upstream.OpenAIBaseURL, out.Upstream.LoginPath = c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath
 	out.Upstream.LoginTimeout, out.Upstream.RequestTimeout, out.Upstream.UserAgent = c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent
-	out.Auth.Strategy, out.Auth.AutoRelogin = c.Auth.Strategy, c.Auth.AutoRelogin
+	out.Auth.Strategy, out.Auth.RPM, out.Auth.AutoRelogin = c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin
+	if out.Auth.RPM <= 0 {
+		out.Auth.RPM = 4
+	}
 	out.Checkin.Enable, out.Checkin.Path, out.Checkin.At, out.Checkin.Timezone = c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone
 	out.Redemption.Enable, out.Redemption.At = c.Redemption.Enable, c.Redemption.At
 	out.Redemption.CodeConfigured = strings.TrimSpace(c.Redemption.Code) != ""
@@ -147,8 +153,18 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 		return errors.New("监听地址不能为空")
 	}
 	strategy := strings.ToLower(strings.TrimSpace(settings.Auth.Strategy))
-	if strategy != "round_robin" && strategy != "random" {
-		return errors.New("账号策略必须是 round_robin 或 random")
+	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
+		return errors.New("账号策略必须是 round_robin、random 或 fixed")
+	}
+	rpm := settings.Auth.RPM
+	if rpm == 0 {
+		rpm = c.Auth.RPM
+		if rpm == 0 {
+			rpm = 4
+		}
+	}
+	if rpm < 1 || rpm > 1000 {
+		return errors.New("每账号并发上限必须在 1 到 1000 之间")
 	}
 	loginTimeout, err := time.ParseDuration(strings.TrimSpace(settings.Upstream.LoginTimeout))
 	if err != nil || loginTimeout <= 0 {
@@ -181,7 +197,7 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	c.Upstream.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.BaseURL), "/")
 	c.Upstream.OpenAIBaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.OpenAIBaseURL), "/")
 	c.Upstream.LoginPath, c.Upstream.LoginTimeout, c.Upstream.RequestTimeout, c.Upstream.UserAgent = strings.TrimSpace(settings.Upstream.LoginPath), loginTimeout, requestTimeout, strings.TrimSpace(settings.Upstream.UserAgent)
-	c.Auth.Strategy, c.Auth.AutoRelogin = strategy, settings.Auth.AutoRelogin
+	c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin = strategy, rpm, settings.Auth.AutoRelogin
 	c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone = settings.Checkin.Enable, strings.TrimSpace(settings.Checkin.Path), strings.TrimSpace(settings.Checkin.At), strings.TrimSpace(settings.Checkin.Timezone)
 	c.Redemption.Enable, c.Redemption.At = settings.Redemption.Enable, redemptionAt
 	if strings.TrimSpace(settings.Redemption.Code) != "" {
@@ -254,6 +270,7 @@ identifier = %q
 password = %q
 accounts = %q
 strategy = %q
+rpm = %d
 auto_relogin = %t
 
 [admin]
@@ -273,7 +290,7 @@ at = %q
 code = %q
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
-		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.AutoRelogin,
+		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin,
 		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
 		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
@@ -319,6 +336,7 @@ identifier = ""
 password = ""
 accounts = ""
 strategy = "round_robin"
+rpm = 4
 auto_relogin = true
 [admin]
 token = ""

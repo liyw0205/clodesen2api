@@ -155,6 +155,8 @@ input[type="checkbox"] { width: 17px; min-height: 17px; padding: 0; accent-color
 .status-badge { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 8px; border-radius: 2px; font-size: 12px; line-height: 16px; font-weight: 600; white-space: nowrap; }
 .status-badge::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; }
 .status-ready { color: var(--green); background: var(--green-soft); }.status-cooldown { color: var(--amber); background: var(--amber-soft); }.status-paused { color: var(--muted); background: #edf1ee; }.status-error { color: var(--red); background: var(--red-soft); }
+.account-status-stack { display: grid; justify-items: start; gap: 4px; width: max-content; max-width: 100%; }.account-rpm { color: var(--muted); font-family: "Geist Mono", ui-monospace, monospace; font-size: 11px; line-height: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 680px) { .account-card-top .account-status-stack { flex-shrink: 0; justify-items: end; } }
 .checkin-cell { color: var(--muted); font-size: 13px; line-height: 20px; white-space: nowrap; }.checkin-done { color: var(--green); }.checkin-pending { color: var(--amber); }
 .row-actions { display: inline-flex; justify-content: end; gap: 4px; width: 100%; }.row-action { min-height: 34px; padding: 7px 9px; color: var(--muted); background: transparent; border: 0; border-radius: 3px; cursor: pointer; font-size: 12px; line-height: 16px; font-weight: 600; }.row-action:hover, .text-button:hover { color: var(--ink); background: var(--surface-soft); }.row-action-danger { color: var(--red); }
 .account-cards, .model-cards, .usage-cards { display: none; }

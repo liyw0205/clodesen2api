@@ -97,7 +97,7 @@ func NewHandlerWithUsage(up *upstream.Upstream, stats *usage.Collector, adminHan
 					response.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 					response.WriteHeader(http.StatusServiceUnavailable)
 					_ = json.NewEncoder(response).Encode(map[string]string{
-						"error": "all upstream accounts are cooling down",
+						"error": "all upstream accounts are temporarily unavailable",
 					})
 					return
 				}

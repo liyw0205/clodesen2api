@@ -121,17 +121,21 @@ func TestAdminSessionProtectsAccountDataAndMutation(t *testing.T) {
 	}
 	var result struct {
 		AvailableCredits int64
+		RPMLimit         int
 		Accounts         []struct {
 			Identifier          string
 			Balance             int64
 			RedemptionRemaining int64
+			RPMUsed             int
+			RPMLimit            int
 		}
 	}
 	if err := json.Unmarshal([]byte(body), &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.AvailableCredits != 1234 || len(result.Accounts) != 1 ||
-		result.Accounts[0].Balance != 1234 || result.Accounts[0].RedemptionRemaining != 2 {
+		result.Accounts[0].Balance != 1234 || result.Accounts[0].RedemptionRemaining != 2 ||
+		result.RPMLimit != 4 || result.Accounts[0].RPMUsed != 0 || result.Accounts[0].RPMLimit != 4 {
 		t.Fatalf("unexpected account response: %+v", result)
 	}
 
@@ -156,6 +160,10 @@ func TestAdminSessionProtectsAccountDataAndMutation(t *testing.T) {
 	response, _ = requestJSON(t, client, http.MethodPut, server.URL+"/admin/api/settings", jsonBody(t, map[string]string{"strategy": "random"}), server.URL)
 	if response.StatusCode != http.StatusOK || up.Strategy() != "random" || store.Strategy() != "random" {
 		t.Fatalf("strategy update status=%d runtime=%s stored=%s", response.StatusCode, up.Strategy(), store.Strategy())
+	}
+	response, _ = requestJSON(t, client, http.MethodPut, server.URL+"/admin/api/settings", jsonBody(t, map[string]string{"strategy": "fixed"}), server.URL)
+	if response.StatusCode != http.StatusOK || up.Strategy() != "fixed" || store.Strategy() != "fixed" {
+		t.Fatalf("fixed strategy update status=%d runtime=%s stored=%s", response.StatusCode, up.Strategy(), store.Strategy())
 	}
 }
 

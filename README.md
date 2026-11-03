@@ -1,6 +1,6 @@
 # clodesen2api
 
-OpenAI-compatible gateway with multi-account rotation, random selection, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, credit usage history, and scheduled redemption-code credit resets.
+OpenAI-compatible gateway with round-robin, random, and fixed account routing, per-account concurrent request limits, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, credit usage history, and scheduled redemption-code credit resets.
 
 ## Download
 

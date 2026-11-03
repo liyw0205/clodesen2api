@@ -103,7 +103,7 @@ func (s *AccountStore) Replace(accounts []upstream.AccountCredential) error {
 func (s *AccountStore) SetStrategy(strategy string) error {
 	strategy = normalizeStrategy(strategy)
 	if strategy == "" {
-		return errors.New("strategy must be round_robin or random")
+		return errors.New("strategy must be round_robin, random, or fixed")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -211,7 +211,7 @@ func copyCredentials(accounts []upstream.AccountCredential) []upstream.AccountCr
 
 func normalizeStrategy(strategy string) string {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
-	if strategy == "round_robin" || strategy == "random" {
+	if strategy == "round_robin" || strategy == "random" || strategy == "fixed" {
 		return strategy
 	}
 	return ""

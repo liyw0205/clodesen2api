@@ -252,6 +252,7 @@
     $("#settings-request-timeout").value = settings.upstream?.requestTimeout || "0s";
     $("#settings-user-agent").value = settings.upstream?.userAgent || "";
     $("#settings-strategy").value = settings.auth?.strategy || "round_robin";
+    $("#settings-account-rpm").value = settings.auth?.rpm || 4;
     $("#settings-auto-relogin").checked = Boolean(settings.auth?.autoRelogin);
     $("#settings-checkin-enable").checked = Boolean(settings.checkin?.enable);
     $("#settings-checkin-path").value = settings.checkin?.path || "";
@@ -283,7 +284,7 @@
       baseURL: $("#settings-base-url").value.trim(), openAIBaseURL: $("#settings-openai-url").value.trim(),
       loginPath: $("#settings-login-path").value.trim(), loginTimeout: $("#settings-login-timeout").value.trim(),
       requestTimeout: $("#settings-request-timeout").value.trim(), userAgent: $("#settings-user-agent").value.trim(),
-    }, auth: { strategy: $("#settings-strategy").value, autoRelogin: $("#settings-auto-relogin").checked }, checkin: {
+    }, auth: { strategy: $("#settings-strategy").value, rpm: Number($("#settings-account-rpm").value), autoRelogin: $("#settings-auto-relogin").checked }, checkin: {
       enable: $("#settings-checkin-enable").checked, path: $("#settings-checkin-path").value.trim(),
       at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
     }, redemption: {
@@ -594,6 +595,13 @@
     return badge;
   }
 
+  function statusWithRPM(account) {
+    const stack = element("div", "account-status-stack");
+    stack.append(statusBadge(account));
+    stack.append(element("span", "account-rpm", "并发 " + (account.rpmUsed ?? 0) + "/" + (account.rpmLimit || 4)));
+    return stack;
+  }
+
   function createCheckbox(account, className) {
     const label = element("label", className);
     const checkbox = document.createElement("input");
@@ -629,7 +637,7 @@
       balanceCell.append(element("strong", "", formatNumber(account.balance)));
       const quotaCell = element("td", "quota-cell", quotaText(account));
       const stateCell = element("td");
-      stateCell.append(statusBadge(account));
+      stateCell.append(statusWithRPM(account));
       const checkinCell = element("td", "checkin-cell", checkinText(account));
       if (account.checkedIn === true) checkinCell.classList.add("checkin-done");
       if (account.checkedIn === false) checkinCell.classList.add("checkin-pending");
@@ -658,7 +666,7 @@
       info.append(element("strong", "", account.identifier));
       info.append(element("span", "", accountDetail(account)));
       top.append(info);
-      top.append(statusBadge(account));
+      top.append(statusWithRPM(account));
       const data = element("div", "account-card-data");
       const balance = element("div");
       balance.append(element("label", "", "积分余额"));
@@ -896,7 +904,7 @@
       const result = await api("/admin/api/settings", { method: "PUT", body: JSON.stringify({ strategy }) });
       state.strategy = result.strategy;
       renderStrategies();
-      showToast(strategy === "random" ? "已切换为随机选择" : "已切换为轮询选择");
+      showToast(({ round_robin: "已切换为轮询选择", random: "已切换为随机选择", fixed: "已切换为固定选择" })[strategy] || "账号策略已更新");
     } catch (error) {
       showToast(error.message);
     } finally {

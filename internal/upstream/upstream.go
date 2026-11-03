@@ -45,6 +45,9 @@ type Upstream struct {
 	owner                *Upstream
 	poolMode             bool
 	strategy             string
+	rpmLimit             int
+	rpmInFlight          map[string]int
+	fixedAccount         *Upstream
 	poolMu               sync.Mutex
 	nextAccount          int
 	cooldownUntil        map[*Upstream]time.Time
@@ -123,13 +126,19 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 	if strategy == "" {
 		strategy = "round_robin"
 	}
-	if strategy != "round_robin" && strategy != "random" {
-		return nil, fmt.Errorf("invalid auth.strategy %q (want round_robin or random)", cfg.Auth.Strategy)
+	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
+		return nil, fmt.Errorf("invalid auth.strategy %q (want round_robin, random, or fixed)", cfg.Auth.Strategy)
+	}
+	rpmLimit := configuredRPM(cfg.Auth.RPM)
+	if rpmLimit > 1000 {
+		return nil, fmt.Errorf("invalid auth.rpm %d (want 1 to 1000)", cfg.Auth.RPM)
 	}
 
 	pool := &Upstream{
 		cfg: cfg, poolMode: true,
 		strategy:       strategy,
+		rpmLimit:       rpmLimit,
+		rpmInFlight:    make(map[string]int),
 		cooldownUntil:  make(map[*Upstream]time.Time),
 		cooldownReason: make(map[*Upstream]string),
 		creditPricing:  make(map[string]int64),
@@ -178,13 +187,15 @@ func (u *Upstream) ApplyRuntimeConfig(cfg *config.Config) {
 	u.cfg.Server = cfg.Server
 	u.cfg.Upstream = cfg.Upstream
 	u.cfg.Auth.Strategy = cfg.Auth.Strategy
+	u.cfg.Auth.RPM = cfg.Auth.RPM
 	u.cfg.Auth.AutoRelogin = cfg.Auth.AutoRelogin
 	u.cfg.Checkin = cfg.Checkin
 	u.mu.Unlock()
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
-	if strategy == "round_robin" || strategy == "random" {
+	if strategy == "round_robin" || strategy == "random" || strategy == "fixed" {
 		u.poolMu.Lock()
 		u.strategy = strategy
+		u.rpmLimit = configuredRPM(cfg.Auth.RPM)
 		u.poolMu.Unlock()
 	}
 	accounts := u.accountsSnapshot()
@@ -314,6 +325,8 @@ func newSession(cfg *config.Config) (*Upstream, error) {
 			enabled:        true,
 			cooldownUntil:  make(map[*Upstream]time.Time),
 			cooldownReason: make(map[*Upstream]string),
+			rpmLimit:       configuredRPM(cfg.Auth.RPM),
+			rpmInFlight:    make(map[string]int),
 			httpClient:     &http.Client{Transport: transport, Jar: jar, Timeout: mainTimeout},
 			loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 		}, nil
@@ -324,6 +337,8 @@ func newSession(cfg *config.Config) (*Upstream, error) {
 		enabled:        true,
 		cooldownUntil:  make(map[*Upstream]time.Time),
 		cooldownReason: make(map[*Upstream]string),
+		rpmLimit:       configuredRPM(cfg.Auth.RPM),
+		rpmInFlight:    make(map[string]int),
 		httpClient:     &http.Client{Transport: transport, Jar: jar},
 		loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 	}, nil
@@ -553,14 +568,19 @@ func (u *Upstream) allocateImageRoute(ctx context.Context, host, openAIBaseURL s
 		return imageRoute{targetURL: openAIBaseURL + request.Path}, nil
 	}
 	if resp.StatusCode/100 != 2 {
+		upstreamResponse := &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 			return imageRoute{}, &safeAccountRetryError{
 				err:            fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body)),
+				response:       upstreamResponse,
 				cooldownUntil:  restriction.cooldownUntil,
 				disableAccount: restriction.disableAccount,
 			}
 		}
-		return imageRoute{}, fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body))
+		return imageRoute{}, &safeAccountRetryError{
+			err:      fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body)),
+			response: upstreamResponse,
+		}
 	}
 
 	var route computeRouteResponse
@@ -611,7 +631,10 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request o
 			u.poolMu.Unlock()
 			return &NoAccountAvailableError{RetryAfter: retryAfter}, false
 		}
-		err, wrote, insufficient := u.forwardSingle(ctx, w, request)
+		if !u.reserveAccountRequest(u) {
+			return &NoAccountAvailableError{RetryAfter: u.rpmRetryAfter()}, false
+		}
+		err, wrote, insufficient := u.forwardReservedSingle(ctx, w, request, u)
 		if err != nil {
 			u.applyAccountRetryError(u, err)
 		}
@@ -642,13 +665,13 @@ type accountCandidate struct {
 	account *Upstream
 }
 
-// NoAccountAvailableError is returned while every configured account is cooling down.
+// NoAccountAvailableError is returned when no enabled account can accept a request.
 type NoAccountAvailableError struct {
 	RetryAfter time.Duration
 }
 
 func (e *NoAccountAvailableError) Error() string {
-	return "all upstream accounts are cooling down"
+	return "all upstream accounts are cooling down or at their concurrency limit"
 }
 
 type safeAccountRetryError struct {
@@ -677,21 +700,26 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 	if len(candidates) == 0 {
 		return &NoAccountAvailableError{RetryAfter: retryAfter}, false
 	}
+	imageRequest := isImageRequest(request.Path)
 
 	var insufficient *bufferedResponse
 	var retryableResponse *bufferedResponse
 	var lastErr error
 	attempted := 0
 	for _, candidate := range candidates {
-		if !u.accountAvailable(candidate.account) {
+		if !u.reserveAccountRequest(candidate.account) {
 			continue
 		}
 		attempted++
-		err, wrote, creditResponse := candidate.account.forwardSingle(ctx, w, request)
+		err, wrote, creditResponse := u.forwardReservedSingle(ctx, w, request, candidate.account)
 		if creditResponse != nil {
 			insufficient = creditResponse
 			u.coolDown(candidate.account)
 			log.Printf("[account] account %d exhausted credits; cooling down for %s", candidate.index+1, insufficientCreditsCooldown)
+			if imageRequest {
+				insufficient.writeTo(w)
+				return nil, true
+			}
 			continue
 		}
 		if err != nil {
@@ -706,6 +734,13 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 				}
 				if retryable.response != nil {
 					retryableResponse = retryable.response
+				}
+				if imageRequest {
+					if retryableResponse != nil {
+						retryableResponse.writeTo(w)
+						return nil, true
+					}
+					return err, false
 				}
 				continue
 			}
@@ -739,25 +774,30 @@ func (u *Upstream) selectAccounts() ([]accountCandidate, time.Duration) {
 
 	now := time.Now()
 	candidates := make([]accountCandidate, 0, len(u.accounts))
-	var earliest time.Time
+	var earliest time.Duration
 	for i, account := range u.accounts {
 		if !account.enabled {
 			continue
 		}
 		until := u.cooldownUntil[account]
 		if until.After(now) {
-			if earliest.IsZero() || until.Before(earliest) {
-				earliest = until
+			wait := time.Until(until)
+			if earliest == 0 || wait < earliest {
+				earliest = wait
+			}
+			continue
+		}
+		if u.rpmInFlight[account.accountID] >= configuredRPM(u.rpmLimit) {
+			wait := time.Second
+			if earliest == 0 || wait < earliest {
+				earliest = wait
 			}
 			continue
 		}
 		candidates = append(candidates, accountCandidate{index: i, account: account})
 	}
 	if len(candidates) == 0 {
-		if earliest.IsZero() {
-			return nil, 0
-		}
-		return nil, time.Until(earliest)
+		return nil, earliest
 	}
 
 	if u.strategy == "random" {
@@ -770,19 +810,118 @@ func (u *Upstream) selectAccounts() ([]accountCandidate, time.Duration) {
 	}
 
 	start := u.nextAccount % len(u.accounts)
-	u.nextAccount = (u.nextAccount + 1) % len(u.accounts)
+	if u.strategy == "fixed" {
+		if index := u.accountIndexLocked(u.fixedAccount); index >= 0 {
+			start = index
+		}
+	} else {
+		u.nextAccount = (u.nextAccount + 1) % len(u.accounts)
+	}
 	ordered := make([]accountCandidate, 0, len(candidates))
 	for offset := 0; offset < len(u.accounts); offset++ {
 		index := (start + offset) % len(u.accounts)
-		if !u.accounts[index].enabled {
+		account := u.accounts[index]
+		if !account.enabled {
 			continue
 		}
-		if until := u.cooldownUntil[u.accounts[index]]; until.After(now) {
+		if until := u.cooldownUntil[account]; until.After(now) {
 			continue
 		}
-		ordered = append(ordered, accountCandidate{index: index, account: u.accounts[index]})
+		if u.rpmInFlight[account.accountID] >= configuredRPM(u.rpmLimit) {
+			continue
+		}
+		ordered = append(ordered, accountCandidate{index: index, account: account})
 	}
 	return ordered, 0
+}
+
+func configuredRPM(limit int) int {
+	if limit <= 0 {
+		return 4
+	}
+	return limit
+}
+
+func (u *Upstream) accountIndexLocked(account *Upstream) int {
+	for index, candidate := range u.accounts {
+		if candidate == account {
+			return index
+		}
+	}
+	return -1
+}
+
+func (u *Upstream) reserveAccountRequest(account *Upstream) bool {
+	owner := account.owner
+	if owner == nil {
+		owner = account
+	}
+	owner.poolMu.Lock()
+	defer owner.poolMu.Unlock()
+	if (owner.poolMode && !account.enabled) || owner.cooldownUntil[account].After(time.Now()) {
+		return false
+	}
+	if owner.rpmInFlight == nil {
+		owner.rpmInFlight = make(map[string]int)
+	}
+	if owner.rpmInFlight[account.accountID] >= configuredRPM(owner.rpmLimit) {
+		return false
+	}
+	owner.rpmInFlight[account.accountID]++
+	if owner.strategy == "fixed" && owner.poolMode {
+		owner.fixedAccount = account
+	}
+	return true
+}
+
+func (u *Upstream) releaseAccountRequest(account *Upstream) {
+	owner := account.owner
+	if owner == nil {
+		owner = account
+	}
+	owner.poolMu.Lock()
+	if owner.rpmInFlight[account.accountID] > 1 {
+		owner.rpmInFlight[account.accountID]--
+	} else {
+		delete(owner.rpmInFlight, account.accountID)
+	}
+	owner.poolMu.Unlock()
+}
+
+func (u *Upstream) forwardReservedSingle(ctx context.Context, w http.ResponseWriter, request openai.Request, account *Upstream) (error, bool, *bufferedResponse) {
+	defer u.releaseAccountRequest(account)
+	return account.forwardSingle(ctx, w, request)
+}
+
+func (u *Upstream) rpmRetryAfter() time.Duration {
+	u.poolMu.Lock()
+	defer u.poolMu.Unlock()
+	now := time.Now()
+	var earliest time.Duration
+	accounts := u.accounts
+	if len(accounts) == 0 && !u.poolMode {
+		accounts = []*Upstream{u}
+	}
+	for _, account := range accounts {
+		if !account.enabled {
+			continue
+		}
+		until := u.cooldownUntil[account]
+		if until.After(now) {
+			wait := time.Until(until)
+			if earliest == 0 || wait < earliest {
+				earliest = wait
+			}
+			continue
+		}
+		if u.rpmInFlight[account.accountID] >= configuredRPM(u.rpmLimit) {
+			wait := time.Second
+			if earliest == 0 || wait < earliest {
+				earliest = wait
+			}
+		}
+	}
+	return earliest
 }
 
 func (u *Upstream) accountAvailable(account *Upstream) bool {

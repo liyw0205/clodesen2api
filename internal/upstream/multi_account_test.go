@@ -250,18 +250,33 @@ func TestForwardCoolsAccountUntilUpstreamBanEnd(t *testing.T) {
 		Method: http.MethodPost, Path: openai.EditsPath, Model: "image-model",
 		ContentType: "application/json", Body: []byte(`{"prompt":"test"}`),
 	})
-	if err != nil || !wrote || rec.Code != http.StatusOK {
+	if err != nil || !wrote || rec.Code != http.StatusForbidden {
 		t.Fatalf("Forward() = (%v, %v), status=%d body=%q", err, wrote, rec.Code, rec.Body.String())
 	}
 	mu.Lock()
 	gotRoutes := append([]string(nil), routeAccounts...)
 	mu.Unlock()
-	if want := []string{"first", "second"}; !reflect.DeepEqual(gotRoutes, want) {
+	if want := []string{"first"}; !reflect.DeepEqual(gotRoutes, want) {
 		t.Fatalf("route accounts = %v, want %v", gotRoutes, want)
 	}
 	remaining := time.Until(pool.cooldownUntil[pool.accounts[0]])
 	if remaining < 46*time.Minute || remaining > 47*time.Minute {
 		t.Fatalf("ban cooldown remaining = %s, want close to %s", remaining, 47*time.Minute)
+	}
+
+	nextResponse := httptest.NewRecorder()
+	err, wrote = pool.Forward(context.Background(), nextResponse, openai.Request{
+		Method: http.MethodPost, Path: openai.EditsPath, Model: "image-model",
+		ContentType: "application/json", Body: []byte(`{"prompt":"test"}`),
+	})
+	if err != nil || !wrote || nextResponse.Code != http.StatusOK {
+		t.Fatalf("next Forward() = (%v, %v), status=%d body=%q", err, wrote, nextResponse.Code, nextResponse.Body.String())
+	}
+	mu.Lock()
+	gotRoutes = append([]string(nil), routeAccounts...)
+	mu.Unlock()
+	if want := []string{"first", "second"}; !reflect.DeepEqual(gotRoutes, want) {
+		t.Fatalf("route accounts after next request = %v, want %v", gotRoutes, want)
 	}
 }
 
@@ -388,6 +403,87 @@ func TestForwardRetriesRetryableHTTPStatusWithNextAccount(t *testing.T) {
 	}
 }
 
+func TestForwardDoesNotRetryFailedImageRequestButNextRequestUsesRoundRobin(t *testing.T) {
+	var mu sync.Mutex
+	var imageAccounts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user-auth":
+			var login struct {
+				Identifier string `json:"identifier"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&login); err != nil {
+				t.Errorf("decode login: %v", err)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: login.Identifier, Path: "/"})
+			_, _ = io.WriteString(w, `{}`)
+		case "/api/compute-route":
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/openai" + openai.GenerationsPath:
+			cookie, err := r.Cookie("session")
+			if err != nil {
+				t.Errorf("read session cookie: %v", err)
+				http.Error(w, "missing session", http.StatusUnauthorized)
+				return
+			}
+			mu.Lock()
+			imageAccounts = append(imageAccounts, cookie.Value)
+			call := len(imageAccounts)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			if call == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"message":"temporary image failure"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":[{"b64_json":"ok"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	cfg.Upstream.BaseURL = server.URL
+	cfg.Upstream.OpenAIBaseURL = server.URL + "/api/openai"
+	cfg.Upstream.LoginPath = "/api/user-auth"
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	cfg.Auth.Strategy = "round_robin"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	request := openai.Request{
+		Method: http.MethodPost, Path: openai.GenerationsPath, Model: "gpt-image-2",
+		ContentType: "application/json", Body: []byte(`{"model":"gpt-image-2","prompt":"test"}`),
+	}
+	firstResponse := httptest.NewRecorder()
+	err, wrote := pool.Forward(context.Background(), firstResponse, request)
+	if err != nil || !wrote || firstResponse.Code != http.StatusServiceUnavailable {
+		t.Fatalf("first Forward() = (%v, %v), status=%d body=%q", err, wrote, firstResponse.Code, firstResponse.Body.String())
+	}
+
+	mu.Lock()
+	gotAccounts := append([]string(nil), imageAccounts...)
+	mu.Unlock()
+	if want := []string{"first"}; !reflect.DeepEqual(gotAccounts, want) {
+		t.Fatalf("image accounts after failed request = %v, want %v", gotAccounts, want)
+	}
+
+	secondResponse := httptest.NewRecorder()
+	err, wrote = pool.Forward(context.Background(), secondResponse, request)
+	if err != nil || !wrote || secondResponse.Code != http.StatusOK {
+		t.Fatalf("second Forward() = (%v, %v), status=%d body=%q", err, wrote, secondResponse.Code, secondResponse.Body.String())
+	}
+	mu.Lock()
+	gotAccounts = append([]string(nil), imageAccounts...)
+	mu.Unlock()
+	if want := []string{"first", "second"}; !reflect.DeepEqual(gotAccounts, want) {
+		t.Fatalf("image accounts after next request = %v, want %v", gotAccounts, want)
+	}
+}
+
 func TestForwardRetriesNetworkErrorWithNextAccount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -466,6 +562,141 @@ func TestSelectAccountsRoundRobin(t *testing.T) {
 			t.Errorf("request %d first account = %d, want %d", request, candidates[0].index, wantFirst)
 		}
 	}
+}
+
+func TestFixedStrategyUsesConcurrentCapacityAndReportsRPM(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	cfg.Auth.Strategy = "fixed"
+	cfg.Auth.RPM = 1
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	first, second := pool.accounts[0], pool.accounts[1]
+
+	candidates, _ := pool.selectAccounts()
+	if len(candidates) != 2 || candidates[0].account != first {
+		t.Fatalf("initial fixed candidates = %v, want first account first", candidates)
+	}
+	if !pool.reserveAccountRequest(first) {
+		t.Fatal("first account reservation failed")
+	}
+	if pool.reserveAccountRequest(first) {
+		t.Fatal("first account exceeded its concurrent request limit")
+	}
+	candidates, _ = pool.selectAccounts()
+	if len(candidates) != 1 || candidates[0].account != second {
+		t.Fatalf("candidates after first account is full = %v, want second account", candidates)
+	}
+	if !pool.reserveAccountRequest(second) {
+		t.Fatal("second account reservation failed")
+	}
+	if pool.fixedAccount != second {
+		t.Fatal("fixed strategy did not move to the account used after saturation")
+	}
+	usage, limit := pool.RPMUsage()
+	if usage[first.accountID] != 1 || usage[second.accountID] != 1 || limit != 1 {
+		t.Fatalf("RPM usage = %v, limit=%d; want 1 per account, limit 1", usage, limit)
+	}
+
+	pool.releaseAccountRequest(first)
+	usage, _ = pool.RPMUsage()
+	if usage[first.accountID] != 0 || usage[second.accountID] != 1 {
+		t.Fatalf("RPM usage after release = %v, want first 0 and second 1", usage)
+	}
+	pool.releaseAccountRequest(second)
+}
+
+func TestRPMReservationIsAtomicAcrossConcurrentCallers(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Auth.Accounts = "only:pw"
+	cfg.Auth.RPM = 1
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	account := pool.accounts[0]
+	var count int
+	var countMu sync.Mutex
+	var callers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			if pool.reserveAccountRequest(account) {
+				countMu.Lock()
+				count++
+				countMu.Unlock()
+			}
+		}()
+	}
+	callers.Wait()
+	if count != 1 {
+		t.Fatalf("successful reservations = %d, want exactly one", count)
+	}
+	if usage, _ := pool.RPMUsage(); usage[account.accountID] != 1 {
+		t.Fatalf("RPM usage = %v, want one in-flight request", usage)
+	}
+	pool.releaseAccountRequest(account)
+}
+
+func TestEveryStrategyHonorsPerAccountConcurrencyLimit(t *testing.T) {
+	for _, strategy := range []string{"round_robin", "random", "fixed"} {
+		t.Run(strategy, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Auth.Accounts = "first:pw1,second:pw2"
+			cfg.Auth.Strategy = strategy
+			cfg.Auth.RPM = 1
+			pool, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			for _, account := range pool.accounts {
+				if !pool.reserveAccountRequest(account) {
+					t.Fatalf("could not occupy account %s", account.accountID)
+				}
+			}
+			candidates, retryAfter := pool.selectAccounts()
+			if len(candidates) != 0 || retryAfter <= 0 {
+				t.Fatalf("selection with both accounts occupied = %v, retryAfter=%s", candidates, retryAfter)
+			}
+			pool.releaseAccountRequest(pool.accounts[0])
+			candidates, _ = pool.selectAccounts()
+			if len(candidates) != 1 || candidates[0].account != pool.accounts[0] {
+				t.Fatalf("selection after slot release = %v, want account 0", candidates)
+			}
+			pool.releaseAccountRequest(pool.accounts[1])
+		})
+	}
+}
+
+func TestAccountReplacementKeepsInFlightRPMReservation(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Auth.Accounts = "first:pw1"
+	cfg.Auth.RPM = 1
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	old := pool.accounts[0]
+	if !pool.reserveAccountRequest(old) {
+		t.Fatal("initial reservation failed")
+	}
+	if err := pool.ReplaceAccounts([]AccountCredential{{
+		ID: old.accountID, Identifier: "first", Password: "new-password", Enabled: true,
+	}}); err != nil {
+		t.Fatalf("ReplaceAccounts() error = %v", err)
+	}
+	current := pool.accounts[0]
+	if pool.reserveAccountRequest(current) {
+		t.Fatal("replacement account exceeded the existing in-flight limit")
+	}
+	pool.releaseAccountRequest(old)
+	if !pool.reserveAccountRequest(current) {
+		t.Fatal("old request release did not free the replacement account slot")
+	}
+	pool.releaseAccountRequest(current)
 }
 
 func TestConfiguredAccountsSupportsLegacyAndMultiple(t *testing.T) {

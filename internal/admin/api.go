@@ -497,7 +497,12 @@ func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {
 	defer s.configMu.Unlock()
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.cfg.PublicSettings())
+		settings := s.cfg.PublicSettings()
+		if s.upstream != nil {
+			settings.Auth.Strategy = s.upstream.Strategy()
+			_, settings.Auth.RPM = s.upstream.RPMUsage()
+		}
+		writeJSON(w, http.StatusOK, settings)
 	case http.MethodPut:
 		var settings config.PublicSettings
 		if err := decodeJSON(w, r, &settings); err != nil {
@@ -615,23 +620,47 @@ func (s *Service) listAccounts(w http.ResponseWriter, r *http.Request) {
 	cached, cachedAt := s.accountCacheSnapshot()
 	if !force && len(cached) > 0 {
 		if time.Since(cachedAt) < upstreamCacheTTL {
-			writeCachedJSON(w, cached, "hit")
+			s.writeAccountsJSON(w, cached, "hit")
 			return
 		}
-		writeCachedJSON(w, cached, "stale")
+		s.writeAccountsJSON(w, cached, "stale")
 		s.refreshAccountsAsync()
 		return
 	}
 	result, err := s.refreshAccounts(ctx, force)
 	if err != nil {
 		if len(cached) > 0 {
-			writeCachedJSON(w, cached, "stale-on-error")
+			s.writeAccountsJSON(w, cached, "stale-on-error")
 			return
 		}
 		writeError(w, http.StatusBadGateway, "读取上游账号状态失败")
 		return
 	}
-	writeCachedJSON(w, result, "miss")
+	s.writeAccountsJSON(w, result, "miss")
+}
+
+func (s *Service) writeAccountsJSON(w http.ResponseWriter, body []byte, cacheState string) {
+	var payload map[string]any
+	if s.upstream != nil && json.Unmarshal(body, &payload) == nil {
+		usage, limit := s.upstream.RPMUsage()
+		payload["strategy"] = s.upstream.Strategy()
+		payload["rpmLimit"] = limit
+		if accounts, ok := payload["accounts"].([]any); ok {
+			for _, value := range accounts {
+				account, ok := value.(map[string]any)
+				if !ok {
+					continue
+				}
+				id, _ := account["id"].(string)
+				account["rpmUsed"] = usage[id]
+				account["rpmLimit"] = limit
+			}
+		}
+		if updated, err := json.Marshal(payload); err == nil {
+			body = updated
+		}
+	}
+	writeCachedJSON(w, body, cacheState)
 }
 
 func (s *Service) refreshAccounts(ctx context.Context, force bool) ([]byte, error) {
@@ -706,6 +735,7 @@ func creditConsumedTotal(records []upstream.CreditUsageRecord) (int64, bool) {
 func accountStatusPayload(status upstream.AccountStatus) map[string]any {
 	return map[string]any{
 		"id": status.ID, "identifier": maskIdentifier(status.Identifier), "enabled": status.Enabled,
+		"rpmUsed": status.RPMUsed, "rpmLimit": status.RPMLimit,
 		"cooldownUntil": status.CooldownUntil, "cooldownReason": status.CooldownReason, "balance": status.Balance,
 		"checkedIn":         status.CheckedIn,
 		"redemptionEnabled": status.RedemptionEnabled, "redemptionLimit": status.RedemptionLimit,
@@ -963,7 +993,7 @@ func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	strategy, err := readString(input, "strategy")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "请选择轮询策略")
+		writeError(w, http.StatusBadRequest, "请选择账号策略")
 		return
 	}
 	s.changeMu.Lock()

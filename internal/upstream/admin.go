@@ -18,6 +18,8 @@ type AccountStatus struct {
 	ID                  string     `json:"id"`
 	Identifier          string     `json:"identifier"`
 	Enabled             bool       `json:"enabled"`
+	RPMUsed             int        `json:"rpmUsed"`
+	RPMLimit            int        `json:"rpmLimit"`
 	CooldownUntil       *time.Time `json:"cooldownUntil,omitempty"`
 	CooldownReason      string     `json:"cooldownReason,omitempty"`
 	Balance             *int64     `json:"balance,omitempty"`
@@ -133,6 +135,10 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 	}
 	u.poolMu.Lock()
 	defer u.poolMu.Unlock()
+	fixedAccountID := ""
+	if u.fixedAccount != nil {
+		fixedAccountID = u.fixedAccount.accountID
+	}
 	oldCooldown := make(map[string]time.Time, len(u.cooldownUntil))
 	oldReason := make(map[string]string, len(u.cooldownReason))
 	for account, until := range u.cooldownUntil {
@@ -159,6 +165,13 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 		}
 	}
 	u.accounts = prepared
+	u.fixedAccount = nil
+	for _, account := range prepared {
+		if account.accountID == fixedAccountID {
+			u.fixedAccount = account
+			break
+		}
+	}
 	u.cooldownUntil = nextCooldown
 	u.cooldownReason = nextReason
 	if len(prepared) == 0 {
@@ -177,13 +190,29 @@ func (u *Upstream) Strategy() string {
 
 func (u *Upstream) SetStrategy(strategy string) error {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
-	if strategy != "round_robin" && strategy != "random" {
+	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
 		return fmt.Errorf("invalid strategy %q", strategy)
 	}
 	u.poolMu.Lock()
 	u.strategy = strategy
 	u.poolMu.Unlock()
 	return nil
+}
+
+// RPMUsage returns the current in-flight request count by account ID.
+func (u *Upstream) RPMUsage() (map[string]int, int) {
+	u.poolMu.Lock()
+	defer u.poolMu.Unlock()
+	limit := configuredRPM(u.rpmLimit)
+	accounts := u.accounts
+	if len(accounts) == 0 && !u.poolMode && strings.TrimSpace(u.cfg.Auth.Identifier) != "" {
+		accounts = []*Upstream{u}
+	}
+	usage := make(map[string]int, len(accounts))
+	for _, account := range accounts {
+		usage[account.accountID] = u.rpmInFlight[account.accountID]
+	}
+	return usage, limit
 }
 
 func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
@@ -205,6 +234,11 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 		cooldowns[account] = until
 		cooldownReasons[account] = u.cooldownReason[account]
 	}
+	rpmLimit := configuredRPM(u.rpmLimit)
+	rpmUsed := make(map[*Upstream]int, len(accounts))
+	for _, account := range accounts {
+		rpmUsed[account] = u.rpmInFlight[account.accountID]
+	}
 	u.poolMu.Unlock()
 
 	var wg sync.WaitGroup
@@ -213,6 +247,8 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 			ID:          account.accountID,
 			Identifier:  account.cfg.Auth.Identifier,
 			Enabled:     direct || account.enabled,
+			RPMUsed:     rpmUsed[account],
+			RPMLimit:    rpmLimit,
 			RefreshedAt: time.Now(),
 		}
 		if until := cooldowns[account]; until.After(time.Now()) {
