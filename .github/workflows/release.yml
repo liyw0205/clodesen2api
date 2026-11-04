@@ -76,10 +76,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: '0'
+          BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v0.2.{0}', github.run_number) }}
         run: |
           mkdir -p build/${{ matrix.name }}/bin
           go build ${{ matrix.buildmode && format('-buildmode={0}', matrix.buildmode) || '' }} \
-            -trimpath -ldflags '-s -w' \
+            -trimpath -ldflags "-s -w -X main.version=$BUILD_VERSION -X main.goarm=${GOARM:-7}" \
             -o build/${{ matrix.name }}/bin/${{ matrix.binary }} ./cmd/clodesen2api
       - name: Assemble package
         env:
@@ -109,7 +110,7 @@ jobs:
 
   release:
     name: Publish Release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
     needs: package
     runs-on: ubuntu-latest
     steps:
@@ -122,4 +123,14 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: |
+          VERSION="$GITHUB_REF_NAME"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            VERSION="v0.2.${GITHUB_RUN_NUMBER}"
+          fi
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" --notes "Automated, tested multi-platform build."
+          fi

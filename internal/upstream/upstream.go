@@ -131,7 +131,7 @@ func ConfiguredAccounts(cfg *config.Config) ([]AccountCredential, error) {
 func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upstream, error) {
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
 	if strategy == "" {
-		strategy = "round_robin"
+		strategy = "fixed"
 	}
 	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
 		return nil, fmt.Errorf("invalid auth.strategy %q (want round_robin, random, or fixed)", cfg.Auth.Strategy)

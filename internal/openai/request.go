@@ -3,6 +3,7 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -260,6 +261,9 @@ func buildGenerationRequest(r *http.Request) (Request, error) {
 }
 
 func buildEditRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
+	if hasMediaType(r, "application/json") {
+		return buildJSONEditRequest(r)
+	}
 	if !hasMediaType(r, "multipart/form-data") {
 		return Request{}, &RequestError{
 			Status:  http.StatusUnsupportedMediaType,
@@ -308,6 +312,94 @@ func buildEditRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 	}
 
 	return buildMultipartEditRequest(prompt, size, images)
+}
+
+type jsonImageEditPayload struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Image  struct {
+		URL string `json:"url"`
+	} `json:"image"`
+	AspectRatio    string `json:"aspect_ratio"`
+	Resolution     string `json:"resolution"`
+	ResponseFormat string `json:"response_format"`
+	N              int    `json:"n"`
+}
+
+func buildJSONEditRequest(r *http.Request) (Request, error) {
+	body, err := readBody(r.Body, maxEditBodyBytes)
+	if err != nil {
+		return Request{}, err
+	}
+	var input jsonImageEditPayload
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(&input); err != nil {
+		return Request{}, &RequestError{Status: http.StatusBadRequest, Message: "invalid JSON image edit request"}
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return Request{}, &RequestError{Status: http.StatusBadRequest, Message: "request body must contain one JSON object"}
+	}
+	model := strings.TrimSpace(input.Model)
+	if !strings.HasPrefix(strings.ToLower(model), "grok-imagine-image") {
+		return Request{}, &RequestError{Status: http.StatusUnsupportedMediaType, Message: "JSON image edits are only supported for Grok Imagine models"}
+	}
+	prompt, err := validatePrompt(input.Prompt)
+	if err != nil {
+		return Request{}, err
+	}
+	image, err := decodeImageDataURL(input.Image.URL)
+	if err != nil {
+		return Request{}, err
+	}
+	requestedFormat := strings.TrimSpace(input.ResponseFormat)
+	if requestedFormat == "" {
+		requestedFormat = responseFormat
+	}
+	fields := map[string]string{}
+	if input.AspectRatio != "" {
+		fields["aspect_ratio"] = input.AspectRatio
+	}
+	if input.Resolution != "" {
+		fields["resolution"] = input.Resolution
+	}
+	if input.N > 0 {
+		fields["n"] = fmt.Sprint(input.N)
+	}
+	return buildMultipartEditRequestWithOptions(model, prompt, "", requestedFormat, fields, []imageFile{image})
+}
+
+func decodeImageDataURL(value string) (imageFile, error) {
+	const invalid = "image must be a base64 PNG, JPEG, or WebP data URL"
+	if !strings.HasPrefix(strings.ToLower(value), "data:") {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: invalid, Param: "image"}
+	}
+	parts := strings.SplitN(value[5:], ",", 2)
+	if len(parts) != 2 {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: invalid, Param: "image"}
+	}
+	metadata := strings.Split(parts[0], ";")
+	if len(metadata) != 2 || !strings.EqualFold(metadata[1], "base64") {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: invalid, Param: "image"}
+	}
+	declaredType, _, err := mime.ParseMediaType(metadata[0])
+	if err != nil {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: invalid, Param: "image"}
+	}
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		data, err = base64.RawStdEncoding.DecodeString(parts[1])
+	}
+	if err != nil {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: invalid, Param: "image"}
+	}
+	image, err := validateImageData(data)
+	if err != nil {
+		return imageFile{}, err
+	}
+	if !strings.EqualFold(declaredType, image.contentType) && !(strings.EqualFold(declaredType, "image/jpg") && image.contentType == "image/jpeg") {
+		return imageFile{}, &RequestError{Status: http.StatusBadRequest, Message: "image data URL type does not match its contents", Param: "image"}
+	}
+	return image, nil
 }
 
 func hasMediaType(r *http.Request, expected string) bool {
@@ -381,6 +473,13 @@ func readImage(header *multipart.FileHeader) (imageFile, error) {
 		return imageFile{}, &RequestError{Status: http.StatusRequestEntityTooLarge, Message: "image is too large", Param: "image"}
 	}
 
+	return validateImageData(data)
+}
+
+func validateImageData(data []byte) (imageFile, error) {
+	if int64(len(data)) > maxImageBytes {
+		return imageFile{}, &RequestError{Status: http.StatusRequestEntityTooLarge, Message: "image is too large", Param: "image"}
+	}
 	contentType := http.DetectContentType(data)
 	extension := ""
 	switch contentType {
@@ -398,14 +497,21 @@ func readImage(header *multipart.FileHeader) (imageFile, error) {
 }
 
 func buildMultipartEditRequest(prompt, size string, images []imageFile) (Request, error) {
+	return buildMultipartEditRequestWithOptions(imageModel, prompt, size, responseFormat, nil, images)
+}
+
+func buildMultipartEditRequestWithOptions(model, prompt, size, responseFormat string, fields map[string]string, images []imageFile) (Request, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	if strings.TrimSpace(responseFormat) == "" {
+		responseFormat = "b64_json"
+	}
 
 	for _, field := range []struct {
 		name  string
 		value string
 	}{
-		{name: "model", value: imageModel},
+		{name: "model", value: model},
 		{name: "prompt", value: prompt},
 		{name: "response_format", value: responseFormat},
 	} {
@@ -417,6 +523,16 @@ func buildMultipartEditRequest(prompt, size string, images []imageFile) (Request
 		if err := writer.WriteField("size", size); err != nil {
 			return Request{}, fmt.Errorf("write multipart size: %w", err)
 		}
+	}
+	parameters := map[string]any{"size": size, "image_count": len(images), "response_format": responseFormat}
+	for name, value := range fields {
+		if name == "model" || name == "prompt" || name == "response_format" || name == "size" {
+			continue
+		}
+		if err := writer.WriteField(name, value); err != nil {
+			return Request{}, fmt.Errorf("write multipart %s: %w", name, err)
+		}
+		parameters[name] = value
 	}
 
 	for index, image := range images {
@@ -439,12 +555,10 @@ func buildMultipartEditRequest(prompt, size string, images []imageFile) (Request
 	return Request{
 		Method:      http.MethodPost,
 		Path:        EditsPath,
-		Model:       imageModel,
+		Model:       model,
 		ContentType: writer.FormDataContentType(),
 		Body:        body.Bytes(),
 		Prompt:      prompt,
-		Parameters: map[string]any{
-			"size": size, "image_count": len(images), "response_format": responseFormat,
-		},
+		Parameters:  parameters,
 	}, nil
 }

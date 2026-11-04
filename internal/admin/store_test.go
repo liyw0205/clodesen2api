@@ -38,6 +38,33 @@ func TestAccountStoreUpdateRuntimeStatePersistsCooldown(t *testing.T) {
 	}
 }
 
+func TestAccountStoreUsesFixedForNewDefaultAndPreservesSavedStrategy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	store, err := OpenAccountStore(path, "", nil)
+	if err != nil {
+		t.Fatalf("OpenAccountStore() error = %v", err)
+	}
+	if got := store.Strategy(); got != "fixed" {
+		t.Fatalf("new account store strategy = %q, want fixed", got)
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy-accounts.json")
+	legacy, err := OpenAccountStore(legacyPath, "round_robin", nil)
+	if err != nil {
+		t.Fatalf("create saved round-robin account store: %v", err)
+	}
+	if got := legacy.Strategy(); got != "round_robin" {
+		t.Fatalf("explicit initial strategy = %q, want round_robin", got)
+	}
+	reopened, err := OpenAccountStore(legacyPath, "fixed", nil)
+	if err != nil {
+		t.Fatalf("reopen saved account store: %v", err)
+	}
+	if got := reopened.Strategy(); got != "round_robin" {
+		t.Fatalf("saved strategy = %q, want preserved round_robin", got)
+	}
+}
+
 func TestAccountStoreUpdateRuntimeStatePersistsPermanentDisable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "accounts.json")
 	initial := []upstream.AccountCredential{{

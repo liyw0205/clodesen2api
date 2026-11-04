@@ -548,6 +548,7 @@ func TestForwardReturnsCooldownWhenEveryAccountUnavailable(t *testing.T) {
 func TestSelectAccountsRoundRobin(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Auth.Accounts = "first:pw1,second:pw2,third:pw3"
+	cfg.Auth.Strategy = "round_robin"
 	pool, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -561,6 +562,18 @@ func TestSelectAccountsRoundRobin(t *testing.T) {
 		if candidates[0].index != wantFirst {
 			t.Errorf("request %d first account = %d, want %d", request, candidates[0].index, wantFirst)
 		}
+	}
+}
+
+func TestDefaultStrategyIsFixed(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Auth.Accounts = "first:pw1,second:pw2"
+	pool, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if got := pool.Strategy(); got != "fixed" {
+		t.Fatalf("default strategy = %q, want fixed", got)
 	}
 }
 

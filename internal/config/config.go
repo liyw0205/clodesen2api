@@ -107,7 +107,7 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Auth.Identifier, "identifier", "auth", "identifier", "", "登录账号(邮箱/用户名)")
 	flag.StringConfigVar(&c.Auth.Password, "password", "auth", "password", "", "登录密码")
 	flag.StringConfigVar(&c.Auth.Accounts, "accounts", "auth", "accounts", "", "逗号分隔的账号列表，元素格式为 identifier:password")
-	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "round_robin", "账号选择策略：round_robin、random 或 fixed")
+	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "fixed", "账号选择策略：round_robin、random 或 fixed")
 	flag.IntConfigVar(&c.Auth.RPM, "account-rpm", "auth", "rpm", 4, "每个账号允许同时处理的请求数")
 	flag.BoolConfigVar(&c.Auth.AutoRelogin, "auto-relogin", "auth", "auto_relogin", true, "401 时是否自动重新登录")
 	flag.StringConfigVar(&c.Admin.Token, "admin-token", "admin", "token", "", "管理后台访问令牌（首次设置为 6-20 个字符）")
@@ -335,7 +335,7 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 identifier = ""
 password = ""
 accounts = ""
-strategy = "round_robin"
+strategy = "fixed"
 rpm = 4
 auto_relogin = true
 [admin]

@@ -17,9 +17,13 @@ import (
 	"clodesen2api/internal/config"
 	"clodesen2api/internal/redemption"
 	"clodesen2api/internal/server"
+	"clodesen2api/internal/updater"
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
 )
+
+var version = "dev"
+var goarm = "7"
 
 func main() {
 	cfg := config.Load()
@@ -46,7 +50,7 @@ func main() {
 	if usageErr != nil {
 		log.Printf("[usage] 加载持久化调用统计失败，将从空统计开始: %v", usageErr)
 	}
-	adminHandler := admin.NewHandlerWithConfig(up, accountStore, token, cfg.Admin.TokenFile, cfg, usageStats)
+	adminHandler := admin.NewServiceWithConfig(up, accountStore, token, cfg.Admin.TokenFile, cfg, usageStats)
 
 	// 启动时预登录一次，避免首个请求卡在登录超时上
 	log.Printf("[boot] 正在登录上游账号池 (%d 个账号) %s ...", up.AccountCount(), cfg.Upstream.BaseURL)
@@ -107,6 +111,7 @@ func main() {
 		Handler:           server.NewHandlerWithUsage(up, usageStats, adminHandler),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
+	adminHandler.SetUpdater(version, goarm, updater.Restart)
 
 	// 优雅退出
 	go func() {

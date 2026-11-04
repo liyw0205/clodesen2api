@@ -50,6 +50,8 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Allow", "GET")
 			writeError(w, http.StatusMethodNotAllowed, "方法不支持")
 		}
+	case r.URL.Path == "/admin/api/update":
+		s.updateRoute(w, r)
 	case r.URL.Path == "/admin/api/credit-usage":
 		if r.Method == http.MethodGet {
 			s.listCreditUsage(w, r)

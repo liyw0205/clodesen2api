@@ -49,7 +49,7 @@ func OpenAccountStore(path, strategy string, initial []upstream.AccountCredentia
 			store.strategy = normalizeStrategy(strategy)
 		}
 		if store.strategy == "" {
-			store.strategy = "round_robin"
+			store.strategy = "fixed"
 		}
 		if err := os.Chmod(path, 0o600); err != nil {
 			return nil, fmt.Errorf("restrict admin accounts file permissions: %w", err)
@@ -65,7 +65,7 @@ func OpenAccountStore(path, strategy string, initial []upstream.AccountCredentia
 	store.accounts = copyCredentials(initial)
 	store.strategy = normalizeStrategy(strategy)
 	if store.strategy == "" {
-		store.strategy = "round_robin"
+		store.strategy = "fixed"
 	}
 	if err := store.writeLocked(); err != nil {
 		return nil, err

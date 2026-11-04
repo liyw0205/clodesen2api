@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -181,6 +182,63 @@ func TestBuildEditRequestRebuildsMultipartAndSupportsTenImages(t *testing.T) {
 		if !bytes.Equal(data, testPNG) {
 			t.Errorf("image %d content changed", index)
 		}
+	}
+}
+
+func TestBuildEditRequestNormalizesGrokJSONDataURLToMultipart(t *testing.T) {
+	payload := map[string]any{
+		"model":           "grok-imagine-image2.0",
+		"prompt":          "  restyle this portrait  ",
+		"image":           map[string]string{"url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG), "type": "image_url"},
+		"aspect_ratio":    "3:4",
+		"resolution":      "2k",
+		"response_format": "b64_json",
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := httptest.NewRequest(http.MethodPost, EditsPath, bytes.NewReader(body))
+	incoming.Header.Set("Content-Type", "application/json")
+
+	request, err := BuildRequest(httptest.NewRecorder(), incoming)
+	if err != nil {
+		t.Fatalf("BuildRequest() error = %v", err)
+	}
+	if request.Model != "grok-imagine-image2.0" || request.Prompt != "restyle this portrait" {
+		t.Fatalf("request metadata = model %q prompt %q", request.Model, request.Prompt)
+	}
+	mediaType, _, err := mime.ParseMediaType(request.ContentType)
+	if err != nil || mediaType != "multipart/form-data" {
+		t.Fatalf("content type = %q, parse error = %v", request.ContentType, err)
+	}
+	rebuilt := httptest.NewRequest(http.MethodPost, EditsPath, bytes.NewReader(request.Body))
+	rebuilt.Header.Set("Content-Type", request.ContentType)
+	if err := rebuilt.ParseMultipartForm(1 << 20); err != nil {
+		t.Fatalf("parse rebuilt multipart request: %v", err)
+	}
+	defer rebuilt.MultipartForm.RemoveAll()
+	if got := rebuilt.MultipartForm.Value["model"]; !sameStrings(got, []string{"grok-imagine-image2.0"}) {
+		t.Fatalf("multipart model = %#v", got)
+	}
+	if got := rebuilt.MultipartForm.Value["aspect_ratio"]; !sameStrings(got, []string{"3:4"}) {
+		t.Fatalf("multipart aspect ratio = %#v", got)
+	}
+	if got := rebuilt.MultipartForm.Value["resolution"]; !sameStrings(got, []string{"2k"}) {
+		t.Fatalf("multipart resolution = %#v", got)
+	}
+	files := rebuilt.MultipartForm.File["image"]
+	if len(files) != 1 {
+		t.Fatalf("image count = %d, want 1", len(files))
+	}
+	file, err := files[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(file)
+	_ = file.Close()
+	if err != nil || !bytes.Equal(data, testPNG) {
+		t.Fatalf("image data changed: err=%v data=%x", err, data)
 	}
 }
 

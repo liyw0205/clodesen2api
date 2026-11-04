@@ -4,7 +4,7 @@
     accounts: [],
     selected: new Set(),
     selectionReady: false,
-    strategy: "round_robin",
+    strategy: "fixed",
     deletingID: "",
     toastTimer: 0,
     availableCredits: null,
@@ -20,7 +20,8 @@
     creditUsagePage: 1,
     creditUsagePageSize: 20,
     requestRecords: null,
-    requestRecordsBusy: false,
+    requestRecordsController: null,
+    requestRecordsRequestID: 0,
     requestRecordsLastRefreshAt: 0,
     requestRecordsPage: 1,
     requestRecordsPageSize: 20,
@@ -74,6 +75,51 @@
     loginForm.querySelector("[type=submit]").disabled = !enabled;
     loginError.textContent = "";
     if (!authenticated) loginToken.focus();
+  }
+
+  function renderUpdateStatus(status) {
+    $("#update-current-version").textContent = status.currentVersion || "未知";
+    $("#update-platform").textContent = status.platform || "";
+    $(".sidebar-version").textContent = "Clodesen " + (status.currentVersion || "dev");
+    $("#update-notes").textContent = status.releaseNotes || "";
+    $("#update-notes").hidden = !status.releaseNotes;
+    $("#update-download").href = status.downloadURL || status.releaseURL || "#";
+    $("#update-download").hidden = !status.updateAvailable || status.canInstall;
+    $("#update-install").hidden = !status.canInstall;
+    if (status.updateAvailable) {
+      $("#update-status").textContent = "发现新版本 " + status.latestVersion + (status.canInstall ? "，可直接更新。" : "，请下载对应平台的 ZIP 包。");
+    } else {
+      $("#update-status").textContent = status.latestVersion ? "当前已是最新版本 " + status.currentVersion : "未找到可用的发布版本";
+    }
+  }
+
+  async function checkForUpdates(silent = false) {
+    const button = $("#update-check");
+    button.disabled = true;
+    if (!silent) $("#update-status").textContent = "正在检查版本";
+    try {
+      renderUpdateStatus(await api("/admin/api/update"));
+    } catch (error) {
+      if (error.message === "登录状态已过期，请重新登录") throw error;
+      $("#update-status").textContent = "检查更新失败，请稍后重试";
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function installUpdate() {
+    const button = $("#update-install");
+    button.disabled = true;
+    $("#update-status").textContent = "正在下载并校验更新包，耗时可能受网络影响";
+    try {
+      const result = await api("/admin/api/update", { method: "POST", body: "{}" });
+      $("#update-status").textContent = result.message || "更新已安装，服务即将重启";
+      showToast($("#update-status").textContent);
+      window.setTimeout(() => window.location.reload(), 3000);
+    } catch (error) {
+      $("#update-status").textContent = error.message;
+      button.disabled = false;
+    }
   }
 
   async function api(path, options = {}) {
@@ -263,7 +309,7 @@
     $("#settings-login-timeout").value = settings.upstream?.loginTimeout || "30s";
     $("#settings-request-timeout").value = settings.upstream?.requestTimeout || "0s";
     $("#settings-user-agent").value = settings.upstream?.userAgent || "";
-    $("#settings-strategy").value = settings.auth?.strategy || "round_robin";
+    $("#settings-strategy").value = settings.auth?.strategy || "fixed";
     $("#settings-account-rpm").value = settings.auth?.rpm || 4;
     $("#settings-auto-relogin").checked = Boolean(settings.auth?.autoRelogin);
     $("#settings-checkin-enable").checked = Boolean(settings.checkin?.enable);
@@ -561,22 +607,30 @@
   }
 
   async function loadRequestRecords(force = false) {
-    if (state.requestRecordsBusy) return;
-    state.requestRecordsBusy = true;
+    if (state.requestRecordsController) state.requestRecordsController.abort();
+    const controller = new AbortController();
+    const requestID = ++state.requestRecordsRequestID;
+    state.requestRecordsController = controller;
     const button = $("#records-refresh");
     const oldLabel = button.textContent;
     button.disabled = true;
     $("#request-record-error").hidden = true;
     try {
-      state.requestRecords = await api(requestRecordsPath() + (force ? "&refresh=1" : ""));
+      const result = await api(requestRecordsPath() + (force ? "&refresh=1" : ""), { signal: controller.signal });
+      if (requestID !== state.requestRecordsRequestID) return;
+      state.requestRecords = result;
       renderRequestRecords();
     } catch (error) {
+      if (error.name === "AbortError" || requestID !== state.requestRecordsRequestID) return;
       if (error.message === "登录状态已过期，请重新登录") throw error;
       $("#request-record-error").textContent = error.message;
       $("#request-record-error").hidden = false;
     } finally {
-      button.disabled = false;
-      button.textContent = oldLabel;
+      if (requestID === state.requestRecordsRequestID) {
+        state.requestRecordsController = null;
+        button.disabled = false;
+        button.textContent = oldLabel;
+      }
     }
   }
 
@@ -876,7 +930,7 @@
         const result = await api("/admin/api/accounts" + (force ? "?refresh=1" : ""));
         const nextAccounts = Array.isArray(result.accounts) ? result.accounts : [];
         state.accounts = nextAccounts;
-        state.strategy = result.strategy || "round_robin";
+        state.strategy = result.strategy || "fixed";
         state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
         state.consumedCredits = hasNumber(result.consumedCredits) ? Number(result.consumedCredits) : null;
         state.accountsRefreshedAt = result.refreshedAt || (state.accounts[0] && state.accounts[0].refreshedAt) || null;
@@ -1139,6 +1193,7 @@
         // Load the model catalog and cumulative statistics on the first login,
         // so the analytics view is ready without a manual refresh.
         void loadAnalytics();
+        void checkForUpdates(true);
       }
     } catch (error) {
       setLogin(false, false);
@@ -1161,6 +1216,7 @@
       loginTokenConfirm.value = "";
       setLogin(true, true, false);
       await refresh();
+      void checkForUpdates(true);
     } catch (error) {
       loginError.textContent = error.message;
     } finally {
@@ -1212,6 +1268,8 @@
     loadCreditUsage(false);
   });
   $("#settings-refresh").addEventListener("click", loadSettings);
+  $("#update-check").addEventListener("click", () => checkForUpdates(false));
+  $("#update-install").addEventListener("click", installUpdate);
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#redemption-settings-save").addEventListener("click", saveRedemptionSettings);
   document.querySelectorAll("[data-view]").forEach(button => {

@@ -23,6 +23,7 @@ var fallbackModelCredits = map[string]int64{
 	"gpt-image-2.5-sunburst":    150,
 	"gpt-image-2.5-sunburst-4k": 550,
 	"grok-imagine-image-2.0":    100,
+	"grok-imagine-image2.0":     100,
 	"midjourney-v8.2":           1400,
 	"mimo-v2.5":                 15,
 	"minimax-m3":                15,

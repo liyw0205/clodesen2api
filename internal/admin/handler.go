@@ -52,6 +52,17 @@ type Service struct {
 	redemptionPath      string
 	cfg                 *config.Config
 	configMu            sync.Mutex
+	appVersion          string
+	goarm               string
+	restartProcess      func() error
+}
+
+func (s *Service) SetUpdater(version, goarm string, restart func() error) {
+	s.mu.Lock()
+	s.appVersion = strings.TrimSpace(version)
+	s.goarm = strings.TrimSpace(goarm)
+	s.restartProcess = restart
+	s.mu.Unlock()
 }
 
 func NewHandler(up *upstream.Upstream, store *AccountStore, token string, collectors ...*usage.Collector) http.Handler {
@@ -63,6 +74,10 @@ func NewHandlerWithTokenFile(up *upstream.Upstream, store *AccountStore, token, 
 }
 
 func NewHandlerWithConfig(up *upstream.Upstream, store *AccountStore, token, tokenFile string, cfg *config.Config, collectors ...*usage.Collector) http.Handler {
+	return NewServiceWithConfig(up, store, token, tokenFile, cfg, collectors...)
+}
+
+func NewServiceWithConfig(up *upstream.Upstream, store *AccountStore, token, tokenFile string, cfg *config.Config, collectors ...*usage.Collector) *Service {
 	collector := usage.New()
 	if len(collectors) > 0 && collectors[0] != nil {
 		collector = collectors[0]

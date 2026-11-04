@@ -24,7 +24,7 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # 多账号优先使用此列表；用逗号分隔，格式为 identifier:password
 accounts = ""
 # 请求选账号策略：round_robin（轮询）、random（随机）或 fixed（固定）
-strategy = "round_robin"
+strategy = "fixed"
 # 每个账号同时处理中的模型请求上限（默认 4）
 rpm = 4
 # 单账号兼容配置；accounts 非空时忽略以下两项
