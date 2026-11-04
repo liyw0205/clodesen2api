@@ -25,7 +25,7 @@
     requestRecordsLastRefreshAt: 0,
     requestRecordsPage: 1,
     requestRecordsPageSize: 20,
-    requestRecordFilters: { model: "", account: "", type: "", endpoint: "" },
+    requestRecordFilters: { model: "", account: "", type: "", status: "" },
     settings: null,
   };
 
@@ -46,6 +46,7 @@
   const confirmDialog = $("#confirm-dialog");
   const resultDialog = $("#result-dialog");
   const promptDialog = $("#prompt-dialog");
+  const requestErrorDialog = $("#request-error-dialog");
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -86,10 +87,58 @@
     $("#update-download").href = status.downloadURL || status.releaseURL || "#";
     $("#update-download").hidden = !status.updateAvailable || status.canInstall;
     $("#update-install").hidden = !status.canInstall;
+    if (Array.isArray(status.availableSources)) {
+      const source = $("#update-source");
+      source.replaceChildren(...status.availableSources.map(option => {
+        const node = element("option", "", option.name);
+        node.value = option.id;
+        return node;
+      }));
+      source.value = status.sourceID || "direct";
+      $("#update-custom-wrap").hidden = source.value !== "custom";
+      $("#update-custom-prefix").value = state.settings?.update?.customPrefix || "";
+    }
     if (status.updateAvailable) {
       $("#update-status").textContent = "发现新版本 " + status.latestVersion + (status.canInstall ? "，可直接更新。" : "，请下载对应平台的 ZIP 包。");
     } else {
       $("#update-status").textContent = status.latestVersion ? "当前已是最新版本 " + status.currentVersion : "未找到可用的发布版本";
+    }
+  }
+
+  function updateSourceSelection() {
+    return {
+      source: $("#update-source").value,
+      customPrefix: $("#update-custom-prefix").value.trim(),
+    };
+  }
+
+  async function saveUpdateSource() {
+    const button = $("#update-source-save");
+    button.disabled = true;
+    $("#update-source-result").textContent = "";
+    try {
+      const selection = updateSourceSelection();
+      await api("/admin/api/update", { method: "PUT", body: JSON.stringify(selection) });
+      if (state.settings) state.settings.update = { source: selection.source, customPrefix: selection.customPrefix };
+      showToast("更新加速源已保存");
+    } catch (error) {
+      $("#update-source-result").textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function testUpdateSource() {
+    const button = $("#update-source-test");
+    button.disabled = true;
+    $("#update-source-result").textContent = "测速中";
+    try {
+      const result = await api("/admin/api/update", { method: "PATCH", body: JSON.stringify(updateSourceSelection()) });
+      $("#update-source-result").textContent = result.ok ? "可用 · " + result.latencyMs + " ms" : "不可用 · " + (result.error || "连接失败");
+    } catch (error) {
+      $("#update-source-result").textContent = error.message;
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -316,6 +365,9 @@
     $("#settings-checkin-path").value = settings.checkin?.path || "";
     $("#settings-checkin-at").value = settings.checkin?.at || "04:00";
     $("#settings-checkin-timezone").value = settings.checkin?.timezone || "Asia/Shanghai";
+    $("#update-custom-prefix").value = settings.update?.customPrefix || "";
+    if (settings.update?.source) $("#update-source").value = settings.update.source;
+    $("#update-custom-wrap").hidden = settings.update?.source !== "custom";
     setRedemptionSettingsForm(settings);
   }
 
@@ -323,8 +375,8 @@
     state.settings = settings;
     $("#redemption-auto-enable").checked = Boolean(settings?.redemption?.enable);
     $("#redemption-auto-at").value = settings?.redemption?.at || "04:30";
-    $("#redemption-auto-code").value = "";
-    $("#redemption-auto-note").textContent = settings?.redemption?.codeConfigured ? "兑换码已配置，不会回显原文；留空则保留原兑换码。" : "尚未配置兑换码。";
+    $("#redemption-auto-code").value = settings?.redemption?.code || "";
+    $("#redemption-auto-note").textContent = settings?.redemption?.codeConfigured ? "自动兑换码已配置。" : "尚未配置兑换码。";
     $("#redemption-auto-error").textContent = "";
   }
 
@@ -347,7 +399,7 @@
       at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
     }, redemption: {
       enable: Boolean(state.settings?.redemption?.enable), at: state.settings?.redemption?.at || "04:30",
-      code: "",
+      code: state.settings?.redemption?.code || "",
     }};
     try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
     catch (error) { $("#settings-error").textContent = error.message; }
@@ -512,7 +564,25 @@
   }
 
   function requestRecordStatus(record) {
-    return record.success ? "成功" : (record.status ? "失败 · " + record.status : "未响应");
+    const category = record.statusCategory || (record.success ? "normal" : "abnormal");
+    if (category === "normal") return "正常";
+    if (category === "upstream_error") return "报错" + (record.status ? " · " + record.status : "");
+    return "异常" + (record.status ? " · " + record.status : "");
+  }
+
+  function requestStatusNode(record) {
+    const label = requestRecordStatus(record);
+    const category = record.statusCategory || (record.success ? "normal" : "abnormal");
+    if (category === "upstream_error" && record.error) {
+      const button = element("button", "prompt-button request-error-button", "查看报错");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        $("#request-error-text").textContent = record.error;
+        requestErrorDialog.showModal();
+      });
+      return button;
+    }
+    return element("span", "record-status-" + category, label);
   }
 
   function openPromptDialog(record) {
@@ -542,6 +612,17 @@
 
     const rows = $("#request-record-rows");
     const cards = $("#request-record-cards");
+    const accountFilter = $("#request-filter-account");
+    const selectedAccount = state.requestRecordFilters.account || accountFilter.value;
+    const accountOptions = [element("option", "", "全部账号")];
+    accountOptions[0].value = "";
+    for (const account of result?.availableAccounts || []) {
+      const option = element("option", "", account.label || account.id);
+      option.value = account.id;
+      accountOptions.push(option);
+    }
+    accountFilter.replaceChildren(...accountOptions);
+    accountFilter.value = selectedAccount;
     rows.replaceChildren();
     cards.replaceChildren();
     $("#request-record-empty").hidden = records.length > 0 || !result;
@@ -549,7 +630,6 @@
     $("#request-record-cards").hidden = records.length === 0;
     renderRequestRecordPagination(result);
     for (const record of records) {
-      const statusClass = record.success ? "record-success" : "record-failure";
       const params = requestParametersText(record.parameters);
       const row = element("tr");
       const firstCell = element("td", "request-record-first-cell");
@@ -557,6 +637,8 @@
       else firstCell.textContent = record.firstTokenMs === undefined || record.firstTokenMs === null ? "--" : formatDuration(record.firstTokenMs);
       const thinkingCell = element("td", "request-record-thinking");
       if (record.type !== "image") thinkingCell.textContent = record.thinkingLevel || "未指定";
+      const statusCell = element("td", "");
+      statusCell.append(requestStatusNode(record));
       row.append(element("td", "request-record-time", formatTime(record.createdAt)),
         element("td", "model-id request-record-model", record.model || "未指定"),
         element("td", "request-record-type " + (record.type || ""), requestTypeLabel(record.type)),
@@ -565,13 +647,13 @@
         element("td", "request-record-duration-cell", formatDuration(record.durationMs)),
         firstCell,
         thinkingCell,
-        element("td", statusClass, requestRecordStatus(record)),
+        statusCell,
         element("td", "request-record-parameters", params));
       rows.append(row);
 
       const card = element("article", "request-record-card");
       const top = element("div", "request-record-card-top");
-      top.append(element("strong", "model-id", record.model || "未指定"), element("span", "" + statusClass, requestRecordStatus(record)));
+      top.append(element("strong", "model-id", record.model || "未指定"), requestStatusNode(record));
       const details = element("div", "request-record-card-grid");
       const fields = [["时间", formatTime(record.createdAt)], ["类型", requestTypeLabel(record.type)], ["端点", record.endpoint || "--"], ["账号", record.account || record.accountId || "--"], ["耗时", formatDuration(record.durationMs)]];
       if (record.type === "image") fields.push(["提示词", promptAction(record)]);
@@ -1241,7 +1323,7 @@
       model: $("#request-filter-model").value.trim(),
       account: $("#request-filter-account").value.trim(),
       type: $("#request-filter-type").value,
-      endpoint: $("#request-filter-endpoint").value.trim(),
+      status: $("#request-filter-status").value,
     };
     void loadRequestRecords(false);
   });
@@ -1270,6 +1352,9 @@
   $("#settings-refresh").addEventListener("click", loadSettings);
   $("#update-check").addEventListener("click", () => checkForUpdates(false));
   $("#update-install").addEventListener("click", installUpdate);
+  $("#update-source").addEventListener("change", event => { $("#update-custom-wrap").hidden = event.currentTarget.value !== "custom"; });
+  $("#update-source-test").addEventListener("click", testUpdateSource);
+  $("#update-source-save").addEventListener("click", saveUpdateSource);
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#redemption-settings-save").addEventListener("click", saveRedemptionSettings);
   document.querySelectorAll("[data-view]").forEach(button => {

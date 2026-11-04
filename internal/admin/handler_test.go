@@ -116,7 +116,7 @@ func TestAdminSessionProtectsAccountDataAndMutation(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("accounts status = %d, body=%s", response.StatusCode, body)
 	}
-	if strings.Contains(body, "private-password") || strings.Contains(body, "one@example.test") {
+	if strings.Contains(body, "private-password") {
 		t.Fatalf("account response leaked credentials: %s", body)
 	}
 	var result struct {
@@ -134,7 +134,7 @@ func TestAdminSessionProtectsAccountDataAndMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.AvailableCredits != 1234 || len(result.Accounts) != 1 ||
-		result.Accounts[0].Balance != 1234 || result.Accounts[0].RedemptionRemaining != 2 ||
+		result.Accounts[0].Identifier != "one@example.test" || result.Accounts[0].Balance != 1234 || result.Accounts[0].RedemptionRemaining != 2 ||
 		result.RPMLimit != 4 || result.Accounts[0].RPMUsed != 0 || result.Accounts[0].RPMLimit != 4 {
 		t.Fatalf("unexpected account response: %+v", result)
 	}
@@ -284,7 +284,7 @@ func TestAdminAccountManagementAndRedemptionPersist(t *testing.T) {
 		t.Fatalf("redemption aggregate = %+v, want two accounts and 1000 credits", redeemed)
 	}
 	response, body = requestJSON(t, client, http.MethodGet, server.URL+"/admin/api/redemption-history", "", server.URL)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, "test-code") || !strings.Contains(body, "o***e@example.test") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "test-code") || !strings.Contains(body, "one@example.test") {
 		t.Fatalf("redemption history status=%d body=%s", response.StatusCode, body)
 	}
 

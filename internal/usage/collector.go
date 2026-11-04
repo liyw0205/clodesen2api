@@ -44,6 +44,7 @@ type RequestRecord struct {
 	Endpoint      string         `json:"endpoint"`
 	Type          string         `json:"type"`
 	Status        int            `json:"status"`
+	StatusCategory string        `json:"statusCategory,omitempty"`
 	Success       bool           `json:"success"`
 	Error         string         `json:"error,omitempty"`
 	Parameters    map[string]any `json:"parameters,omitempty"`

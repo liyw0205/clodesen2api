@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"clodesen2api/internal/updater"
 	"github.com/lfhy/flag"
 )
 
@@ -51,6 +52,10 @@ type Config struct {
 		At     string
 		Code   string
 	}
+	Update struct {
+		Source       string
+		CustomPrefix string
+	}
 }
 
 // PublicSettings excludes credentials and tokens from the management API.
@@ -80,9 +85,13 @@ type PublicSettings struct {
 	Redemption struct {
 		Enable         bool   `json:"enable"`
 		At             string `json:"at"`
-		Code           string `json:"code,omitempty"`
+		Code           string `json:"code"`
 		CodeConfigured bool   `json:"codeConfigured"`
 	} `json:"redemption"`
+	Update struct {
+		Source       string `json:"source"`
+		CustomPrefix string `json:"customPrefix"`
+	} `json:"update"`
 }
 
 // Load 用 lfhy/flag 注册所有参数，支持 -c config.toml 统一载入。
@@ -121,6 +130,8 @@ func Load() *Config {
 	flag.BoolConfigVar(&c.Redemption.Enable, "auto-redeem", "redemption", "enable", false, "是否启用每日自动兑换")
 	flag.StringConfigVar(&c.Redemption.At, "auto-redeem-at", "redemption", "at", "04:30", "自动兑换时间(HH:MM，UTC+8)")
 	flag.StringConfigVar(&c.Redemption.Code, "auto-redeem-code", "redemption", "code", "", "自动兑换码")
+	flag.StringConfigVar(&c.Update.Source, "update-source", "update", "source", "builtin:gh-proxy-com", "版本更新下载源")
+	flag.StringConfigVar(&c.Update.CustomPrefix, "update-custom-prefix", "update", "custom_prefix", "", "自定义 GitHub 加速前缀")
 
 	flag.Parse()
 	return c
@@ -144,7 +155,12 @@ func (c *Config) PublicSettings() PublicSettings {
 	}
 	out.Checkin.Enable, out.Checkin.Path, out.Checkin.At, out.Checkin.Timezone = c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone
 	out.Redemption.Enable, out.Redemption.At = c.Redemption.Enable, c.Redemption.At
+	out.Redemption.Code = c.Redemption.Code
 	out.Redemption.CodeConfigured = strings.TrimSpace(c.Redemption.Code) != ""
+	out.Update.Source, out.Update.CustomPrefix = c.Update.Source, c.Update.CustomPrefix
+	if out.Update.Source == "" {
+		out.Update.Source = "builtin:gh-proxy-com"
+	}
 	return out
 }
 
@@ -193,6 +209,20 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	if _, err := time.Parse("15:04", redemptionAt); err != nil {
 		return errors.New("自动兑换时间必须是 HH:MM")
 	}
+	updateSource := strings.TrimSpace(settings.Update.Source)
+	if updateSource == "" {
+		updateSource = strings.TrimSpace(c.Update.Source)
+		if updateSource == "" {
+			updateSource = "builtin:gh-proxy-com"
+		}
+	}
+	customPrefix := strings.TrimSpace(settings.Update.CustomPrefix)
+	if customPrefix == "" && updateSource == "custom" {
+		customPrefix = strings.TrimSpace(c.Update.CustomPrefix)
+	}
+	if _, err := updater.ResolveSource(updater.SourceSelection{ID: updateSource, CustomPrefix: customPrefix}); err != nil {
+		return err
+	}
 	c.Server.Addr = strings.TrimSpace(settings.Server.Addr)
 	c.Upstream.BaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.BaseURL), "/")
 	c.Upstream.OpenAIBaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.OpenAIBaseURL), "/")
@@ -203,6 +233,8 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	if strings.TrimSpace(settings.Redemption.Code) != "" {
 		c.Redemption.Code = strings.TrimSpace(settings.Redemption.Code)
 	}
+	c.Update.Source = updateSource
+	c.Update.CustomPrefix = customPrefix
 	return nil
 }
 
@@ -288,11 +320,16 @@ timezone = %q
 enable = %t
 at = %q
 code = %q
+
+[update]
+source = %q
+custom_prefix = %q
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
 		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin,
 		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
-		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code)
+		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code,
+		c.Update.Source, c.Update.CustomPrefix)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
@@ -351,4 +388,7 @@ timezone = "Asia/Shanghai"
 enable = false
 at = "04:30"
 code = ""
+[update]
+source = "builtin:gh-proxy-com"
+custom_prefix = ""
 `

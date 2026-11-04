@@ -106,3 +106,42 @@ func TestValidateGitHubReleaseURL(t *testing.T) {
 		}
 	}
 }
+
+func TestAvailableSourcesAndResolveCustomSource(t *testing.T) {
+	options := AvailableSources()
+	if len(options) != 7 {
+		t.Fatalf("AvailableSources() returned %d options, want direct + 5 built-ins + custom", len(options))
+	}
+	source, err := ResolveSource(SourceSelection{ID: "custom", CustomPrefix: "https://mirror.example/{url}"})
+	if err != nil {
+		t.Fatalf("ResolveSource(custom) error = %v", err)
+	}
+	if source.Name != "自定义加速源" {
+		t.Fatalf("custom source name = %q", source.Name)
+	}
+	if _, err := ResolveSource(SourceSelection{ID: "custom", CustomPrefix: "http://mirror.example/"}); err == nil {
+		t.Fatal("ResolveSource accepted an insecure custom source")
+	}
+	if _, err := ResolveSource(SourceSelection{ID: "missing"}); err == nil {
+		t.Fatal("ResolveSource accepted an unknown built-in source")
+	}
+}
+
+func TestSourceRewriteSupportsPrefixAndTemplate(t *testing.T) {
+	for _, test := range []struct {
+		selection SourceSelection
+		want      string
+	}{
+		{SourceSelection{ID: "builtin:ghfast-top"}, "https://ghfast.top/https://github.com/example/release.zip"},
+		{SourceSelection{ID: "custom", CustomPrefix: "https://mirror.example/{url}"}, "https://mirror.example/https://github.com/example/release.zip"},
+		{SourceSelection{ID: "direct"}, "https://github.com/example/release.zip"},
+	} {
+		source, err := resolveSource(test.selection)
+		if err != nil {
+			t.Fatalf("resolveSource(%+v) error = %v", test.selection, err)
+		}
+		if got := source.rewrite("https://github.com/example/release.zip"); got != test.want {
+			t.Errorf("rewrite(%+v) = %q, want %q", test.selection, got, test.want)
+		}
+	}
+}

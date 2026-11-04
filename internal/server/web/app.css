@@ -271,13 +271,23 @@ input[type="checkbox"] { width: 17px; min-height: 17px; padding: 0; accent-color
 .request-record-card-field:last-child { grid-column: 1 / -1; }
 .request-record-card-field .field-label { color: var(--muted); font-size: 11px; line-height: 15px; }
 .request-record-card-field strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 18px; font-weight: 500; }
+.update-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 12px; padding: 14px; background: var(--surface); border-radius: 6px; box-shadow: var(--shadow-inset); }
+.update-source-grid label { display: grid; gap: 7px; min-width: 0; color: var(--ink-soft); font-size: 12px; line-height: 16px; font-weight: 600; }
+.update-source-grid select, .update-source-grid input { width: 100%; min-width: 0; }
+.update-source-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; grid-column: 1 / -1; }
+.update-source-actions .field-note { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
+.record-status-normal { color: var(--green-dark); font-weight: 600; }
+.record-status-upstream_error { color: var(--red); font-weight: 600; }
+.record-status-abnormal { color: #8a6115; font-weight: 600; }
+.request-error-button { color: var(--red); background: #fff0ed; border-color: #f1c8c1; }
+.request-error-button:hover { background: #ffe2dc; border-color: #e7aaa0; }
 
 @media (max-width: 900px) {
   .request-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 680px) {
-  .request-record-summary { margin-right: -16px; margin-left: -16px; padding-right: 16px; padding-left: 16px; }
+  .request-record-summary { margin-right: -12px; margin-left: -12px; padding-right: 16px; padding-left: 16px; }
   .request-record-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .request-record-filters .button { grid-column: 1 / -1; width: 100%; }
   #request-record-table-wrap { display: none !important; }
@@ -417,6 +427,8 @@ input[type="checkbox"] { accent-color: var(--green); box-shadow: none; }
 }
 
 @media (max-width: 680px) {
+  .update-source-grid { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .update-source-actions { grid-column: auto; }
   .account-card, .model-card, .usage-card, .request-record-card { border-radius: 8px; box-shadow: var(--shadow-small); }
   .dialog-shell { border-radius: 12px 12px 0 0; }
   .dialog-compact { border-radius: 12px; }

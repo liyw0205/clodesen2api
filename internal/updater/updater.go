@@ -28,17 +28,46 @@ const (
 )
 
 type Status struct {
-	CurrentVersion  string    `json:"currentVersion"`
-	LatestVersion   string    `json:"latestVersion"`
-	UpdateAvailable bool      `json:"updateAvailable"`
-	CanInstall      bool      `json:"canInstall"`
-	Platform        string    `json:"platform"`
-	ReleaseURL      string    `json:"releaseURL"`
-	ReleaseNotes    string    `json:"releaseNotes,omitempty"`
-	PublishedAt     time.Time `json:"publishedAt,omitempty"`
-	AssetName       string    `json:"assetName,omitempty"`
-	DownloadURL     string    `json:"downloadURL,omitempty"`
-	ChecksumURL     string    `json:"-"`
+	CurrentVersion   string         `json:"currentVersion"`
+	LatestVersion    string         `json:"latestVersion"`
+	UpdateAvailable  bool           `json:"updateAvailable"`
+	CanInstall       bool           `json:"canInstall"`
+	Platform         string         `json:"platform"`
+	ReleaseURL       string         `json:"releaseURL"`
+	ReleaseNotes     string         `json:"releaseNotes,omitempty"`
+	PublishedAt      time.Time      `json:"publishedAt,omitempty"`
+	AssetName        string         `json:"assetName,omitempty"`
+	DownloadURL      string         `json:"downloadURL,omitempty"`
+	ChecksumURL      string         `json:"-"`
+	SourceID         string         `json:"sourceID"`
+	SourceName       string         `json:"sourceName"`
+	AvailableSources []SourceOption `json:"availableSources"`
+	officialURL      string
+	sourcePrefix     string
+}
+
+type SourceSelection struct {
+	ID           string `json:"source"`
+	CustomPrefix string `json:"customPrefix"`
+}
+
+type SourceOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type resolvedSource struct {
+	id     string
+	name   string
+	prefix string
+}
+
+var builtInSources = []resolvedSource{
+	{id: "builtin:gh-proxy-com", name: "gh-proxy.com", prefix: "https://gh-proxy.com/"},
+	{id: "builtin:ghfast-top", name: "ghfast.top", prefix: "https://ghfast.top/"},
+	{id: "builtin:ghproxy-net", name: "ghproxy.net", prefix: "https://ghproxy.net/"},
+	{id: "builtin:ghproxy-icu", name: "ghproxy.icu", prefix: "https://ghproxy.icu/"},
+	{id: "builtin:ghproxy-imciel", name: "ghproxy.imciel.com", prefix: "https://ghproxy.imciel.com/"},
 }
 
 type release struct {
@@ -52,8 +81,73 @@ type release struct {
 	} `json:"assets"`
 }
 
-func Check(ctx context.Context, currentVersion, goos, goarch, goarm string) (Status, error) {
+func AvailableSources() []SourceOption {
+	options := []SourceOption{{ID: "direct", Name: "不使用加速源"}}
+	for _, source := range builtInSources {
+		options = append(options, SourceOption{ID: source.id, Name: source.name})
+	}
+	options = append(options, SourceOption{ID: "custom", Name: "自定义加速源"})
+	return options
+}
+
+func ResolveSource(selection SourceSelection) (SourceOption, error) {
+	source, err := resolveSource(selection)
+	if err != nil {
+		return SourceOption{}, err
+	}
+	return SourceOption{ID: source.id, Name: source.name}, nil
+}
+
+func resolveSource(selection SourceSelection) (resolvedSource, error) {
+	id := strings.TrimSpace(selection.ID)
+	if id == "" || id == "direct" {
+		return resolvedSource{id: "direct", name: "不使用加速源"}, nil
+	}
+	for _, source := range builtInSources {
+		if id == source.id {
+			return source, nil
+		}
+	}
+	if id != "custom" {
+		return resolvedSource{}, errors.New("更新加速源无效")
+	}
+	prefix := strings.TrimSpace(selection.CustomPrefix)
+	probe := strings.ReplaceAll(prefix, "{url}", "https://github.com/example/project")
+	parsed, err := url.Parse(probe)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return resolvedSource{}, errors.New("自定义加速源必须是有效的 HTTPS 地址")
+	}
+	if strings.Count(prefix, "{url}") > 1 {
+		return resolvedSource{}, errors.New("自定义加速源只能包含一个 {url}")
+	}
+	if prefix == "" {
+		return resolvedSource{}, errors.New("请填写自定义加速源地址")
+	}
+	return resolvedSource{id: "custom", name: "自定义加速源", prefix: prefix}, nil
+}
+
+func (source resolvedSource) rewrite(target string) string {
+	if source.id == "direct" {
+		return target
+	}
+	if strings.Contains(source.prefix, "{url}") {
+		return strings.Replace(source.prefix, "{url}", target, 1)
+	}
+	return source.prefix + target
+}
+
+func Check(ctx context.Context, currentVersion, goos, goarch, goarm string, selections ...SourceSelection) (Status, error) {
 	status := Status{CurrentVersion: currentVersion, Platform: platformName(goos, goarch, goarm)}
+	selection := SourceSelection{ID: "builtin:gh-proxy-com"}
+	if len(selections) > 0 {
+		selection = selections[0]
+	}
+	source, err := resolveSource(selection)
+	if err != nil {
+		return status, err
+	}
+	status.SourceID, status.SourceName, status.sourcePrefix = source.id, source.name, source.prefix
+	status.AvailableSources = AvailableSources()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, githubLatestReleaseURL, nil)
 	if err != nil {
 		return status, err
@@ -94,7 +188,8 @@ func Check(ctx context.Context, currentVersion, goos, goarch, goarm string) (Sta
 	checksumName := strings.TrimSuffix(assetName, ".zip") + ".sha256"
 	for _, asset := range latest.Assets {
 		if asset.Name == assetName {
-			status.DownloadURL = asset.BrowserDownloadURL
+			status.officialURL = asset.BrowserDownloadURL
+			status.DownloadURL = source.rewrite(asset.BrowserDownloadURL)
 		}
 		if asset.Name == checksumName {
 			status.ChecksumURL = asset.BrowserDownloadURL
@@ -110,13 +205,17 @@ func Install(ctx context.Context, status Status, executable string) error {
 	if !status.UpdateAvailable || !status.CanInstall {
 		return errors.New("no installable update is available")
 	}
-	if err := validateGitHubReleaseURL(status.DownloadURL); err != nil {
+	if err := validateGitHubReleaseURL(status.officialURL); err != nil {
 		return err
+	}
+	source, err := resolveSource(SourceSelection{ID: status.SourceID, CustomPrefix: status.sourcePrefix})
+	if err != nil || source.rewrite(status.officialURL) != status.DownloadURL {
+		return errors.New("update asset URL does not match the selected source")
 	}
 	if err := validateGitHubReleaseURL(status.ChecksumURL); err != nil {
 		return err
 	}
-	archive, err := download(ctx, status.DownloadURL, maxPackageBytes)
+	archive, err := downloadWithClient(ctx, status.DownloadURL, maxPackageBytes, clientForSource(sourceHost(source), updateHTTPClient.Timeout))
 	if err != nil {
 		return fmt.Errorf("download update package: %w", err)
 	}
@@ -196,12 +295,16 @@ var updateHTTPClient = &http.Client{
 }
 
 func download(ctx context.Context, target string, maxBytes int64) ([]byte, error) {
+	return downloadWithClient(ctx, target, maxBytes, updateHTTPClient)
+}
+
+func downloadWithClient(ctx context.Context, target string, maxBytes int64, client *http.Client) ([]byte, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", "clodesen2api-updater")
-	response, err := updateHTTPClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +320,70 @@ func download(ctx context.Context, target string, maxBytes int64) ([]byte, error
 		return nil, errors.New("download exceeds the allowed size")
 	}
 	return body, nil
+}
+
+func sourceHost(source resolvedSource) string {
+	if source.id == "direct" {
+		return ""
+	}
+	probe := strings.ReplaceAll(source.prefix, "{url}", "https://github.com/example/project")
+	parsed, _ := url.Parse(probe)
+	if parsed == nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func clientForSource(host string, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many redirects while downloading update")
+			}
+			if request.URL.Scheme != "https" {
+				return errors.New("update redirect must use HTTPS")
+			}
+			redirectHost := strings.ToLower(request.URL.Hostname())
+			if redirectHost == host || trustedGitHubHost(redirectHost) {
+				return nil
+			}
+			return errors.New("update redirected outside the selected source")
+		},
+	}
+}
+
+func trustedGitHubHost(host string) bool {
+	switch host {
+	case "api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func TestSource(ctx context.Context, selection SourceSelection) (time.Duration, error) {
+	source, err := resolveSource(selection)
+	if err != nil {
+		return 0, err
+	}
+	const checksumURL = "https://github.com/liyw0205/clodesen2api/releases/download/v0.2.16/clodesen2api-linux-amd64.sha256"
+	start := time.Now()
+	body, err := downloadWithClient(ctx, source.rewrite(checksumURL), 4096, clientForSource(sourceHost(source), 15*time.Second))
+	if err != nil {
+		return time.Since(start), err
+	}
+	fields := strings.Fields(string(body))
+	if len(fields) == 0 || len(fields[0]) != sha256.Size*2 {
+		return time.Since(start), errors.New("加速源未返回有效的 GitHub 校验文件")
+	}
+	if _, err := hex.DecodeString(fields[0]); err != nil {
+		return time.Since(start), errors.New("加速源未返回有效的 GitHub 校验文件")
+	}
+	if len(fields) > 1 && strings.TrimPrefix(fields[1], "*") != "clodesen2api-linux-amd64.zip" {
+		return time.Since(start), errors.New("加速源返回了其他文件的校验信息")
+	}
+	return time.Since(start), nil
 }
 
 func packageBinary(data []byte, windows bool) ([]byte, error) {

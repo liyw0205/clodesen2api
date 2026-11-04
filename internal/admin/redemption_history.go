@@ -31,7 +31,7 @@ type redemptionHistoryFile struct {
 func (s *Service) recordRedemption(code string, result upstream.RedemptionResult) {
 	s.appendRedemptionHistory(RedemptionHistoryRecord{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Code: code,
-		AccountID: result.AccountID, Account: maskIdentifier(result.Identifier),
+		AccountID: result.AccountID, Account: accountIdentifier(result.Identifier),
 		Status: result.Status, Message: result.Message, Credits: result.Credits,
 	})
 }

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"clodesen2api/internal/openai"
@@ -78,6 +79,10 @@ func NewHandlerWithUsage(up *upstream.Upstream, stats *usage.Collector, adminHan
 			defer func() {
 				duration := time.Since(start)
 				stats.Record(request.Model, response.status, duration, forwardErr)
+				recordedError := requestErrorText(forwardErr)
+				if recordedError == "" && len(response.errorBody) > 0 {
+					recordedError = strings.TrimSpace(string(response.errorBody))
+				}
 				var firstTokenMS *int64
 				if requestType(request) != "image" && !response.firstByteAt.IsZero() {
 					value := response.firstByteAt.Sub(start).Milliseconds()
@@ -89,7 +94,7 @@ func NewHandlerWithUsage(up *upstream.Upstream, stats *usage.Collector, adminHan
 					AccountID: response.accountID, Account: response.account,
 					Endpoint: request.Path, Type: requestType(request), Status: response.status,
 					Success: response.status >= http.StatusOK && response.status < http.StatusMultipleChoices,
-					Error:   requestErrorText(forwardErr), Parameters: request.Parameters,
+					Error:   recordedError, Parameters: request.Parameters,
 				})
 			}()
 		}
@@ -141,6 +146,7 @@ type trackingResponseWriter struct {
 	firstByteAt time.Time
 	accountID   string
 	account     string
+	errorBody   []byte
 }
 
 func (w *trackingResponseWriter) SetUpstreamAccount(accountID, identifier string) {
@@ -161,6 +167,14 @@ func (w *trackingResponseWriter) Write(body []byte) (int, error) {
 	}
 	if len(body) > 0 && w.firstByteAt.IsZero() {
 		w.firstByteAt = time.Now()
+	}
+	if w.status >= http.StatusBadRequest && len(w.errorBody) < 512 {
+		remaining := 512 - len(w.errorBody)
+		captured := body
+		if len(body) > remaining {
+			captured = body[:remaining]
+		}
+		w.errorBody = append(w.errorBody, captured...)
 	}
 	return w.ResponseWriter.Write(body)
 }

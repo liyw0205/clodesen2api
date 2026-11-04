@@ -294,7 +294,7 @@ func writeCreditUsage(w http.ResponseWriter, records []upstream.CreditUsageRecor
 	for _, record := range pageRecords {
 		item := map[string]any{
 			"id": record.ID, "accountId": record.AccountID,
-			"account": maskIdentifier(record.Identifier), "model": record.Model,
+			"account": accountIdentifier(record.Identifier), "model": record.Model,
 			"amount": record.Amount, "direction": creditDirection(record.Amount), "balanceAfter": nil,
 			"type": record.Type, "description": record.Description,
 			"status": record.Status, "createdAt": record.CreatedAt, "source": record.Source,
@@ -330,7 +330,7 @@ func creditFilterOptions(records []upstream.CreditUsageRecord) ([]string, []map[
 			id = strings.TrimSpace(record.Identifier)
 		}
 		if id != "" {
-			label := maskIdentifier(record.Identifier)
+			label := accountIdentifier(record.Identifier)
 			if label == "" {
 				label = id
 			}
@@ -431,11 +431,11 @@ func creditAccountStats(records []upstream.CreditUsageRecord) []creditAccountSta
 		}
 		stat := stats[key]
 		if stat == nil {
-			stat = &creditAccountStat{AccountID: record.AccountID, Account: maskIdentifier(record.Identifier)}
+			stat = &creditAccountStat{AccountID: record.AccountID, Account: accountIdentifier(record.Identifier)}
 			stats[key] = stat
 		}
 		if stat.Account == "" {
-			stat.Account = maskIdentifier(record.Identifier)
+			stat.Account = accountIdentifier(record.Identifier)
 		}
 		switch record.Type {
 		case "refund":
@@ -743,7 +743,7 @@ func creditConsumedTotal(records []upstream.CreditUsageRecord) (int64, bool) {
 
 func accountStatusPayload(status upstream.AccountStatus) map[string]any {
 	return map[string]any{
-		"id": status.ID, "identifier": maskIdentifier(status.Identifier), "enabled": status.Enabled,
+		"id": status.ID, "identifier": accountIdentifier(status.Identifier), "enabled": status.Enabled,
 		"rpmUsed": status.RPMUsed, "rpmLimit": status.RPMLimit,
 		"cooldownUntil": status.CooldownUntil, "cooldownReason": status.CooldownReason, "balance": status.Balance,
 		"checkedIn":         status.CheckedIn,
@@ -1065,7 +1065,7 @@ func (s *Service) redeem(w http.ResponseWriter, r *http.Request) {
 	for _, account := range accounts {
 		outcome := s.upstream.RedeemCode(r.Context(), account.ID, code)
 		results = append(results, map[string]any{
-			"account": maskIdentifier(outcome.Identifier), "status": outcome.Status,
+			"account": accountIdentifier(outcome.Identifier), "status": outcome.Status,
 			"message": outcome.Message, "credits": outcome.Credits,
 		})
 		if outcome.Status == "success" {
@@ -1115,19 +1115,6 @@ func readString(input map[string]json.RawMessage, key string) (string, error) {
 	return strings.TrimSpace(value), nil
 }
 
-func maskIdentifier(identifier string) string {
-	parts := strings.SplitN(identifier, "@", 2)
-	if len(parts) == 2 {
-		local := parts[0]
-		if len(local) < 3 {
-			local = local[:1] + "***"
-		} else {
-			local = local[:1] + "***" + local[len(local)-1:]
-		}
-		return local + "@" + parts[1]
-	}
-	if len(identifier) <= 2 {
-		return "**"
-	}
-	return identifier[:2] + "***"
+func accountIdentifier(identifier string) string {
+	return identifier
 }
