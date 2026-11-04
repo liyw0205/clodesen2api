@@ -195,6 +195,7 @@ func requireMethod(r *http.Request, method string) error {
 }
 
 type generationInput struct {
+	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 	Size   string `json:"size"`
 }
@@ -234,8 +235,12 @@ func buildGenerationRequest(r *http.Request) (Request, error) {
 	if err != nil {
 		return Request{}, err
 	}
+	model := strings.TrimSpace(input.Model)
+	if model == "" {
+		model = imageModel
+	}
 	payload, err := json.Marshal(generationPayload{
-		Model:          imageModel,
+		Model:          model,
 		Prompt:         prompt,
 		N:              1,
 		Quality:        "auto",
@@ -249,7 +254,7 @@ func buildGenerationRequest(r *http.Request) (Request, error) {
 	return Request{
 		Method:      http.MethodPost,
 		Path:        GenerationsPath,
-		Model:       imageModel,
+		Model:       model,
 		ContentType: "application/json",
 		Body:        payload,
 		Prompt:      prompt,
@@ -301,6 +306,13 @@ func buildEditRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 	if len(files) > maxImageCount {
 		return Request{}, &RequestError{Status: http.StatusBadRequest, Message: "at most 10 images are allowed", Param: "image"}
 	}
+	model, err := optionalFormValue(r.MultipartForm.Value, "model")
+	if err != nil {
+		return Request{}, err
+	}
+	if strings.TrimSpace(model) == "" {
+		model = imageModel
+	}
 
 	images := make([]imageFile, 0, len(files))
 	for _, fileHeader := range files {
@@ -311,12 +323,13 @@ func buildEditRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 		images = append(images, image)
 	}
 
-	return buildMultipartEditRequest(prompt, size, images)
+	return buildMultipartEditRequest(model, prompt, size, images)
 }
 
 type jsonImageEditPayload struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
+	Size   string `json:"size"`
 	Image  struct {
 		URL string `json:"url"`
 	} `json:"image"`
@@ -340,8 +353,8 @@ func buildJSONEditRequest(r *http.Request) (Request, error) {
 		return Request{}, &RequestError{Status: http.StatusBadRequest, Message: "request body must contain one JSON object"}
 	}
 	model := strings.TrimSpace(input.Model)
-	if !strings.HasPrefix(strings.ToLower(model), "grok-imagine-image") {
-		return Request{}, &RequestError{Status: http.StatusUnsupportedMediaType, Message: "JSON image edits are only supported for Grok Imagine models"}
+	if model == "" {
+		model = imageModel
 	}
 	prompt, err := validatePrompt(input.Prompt)
 	if err != nil {
@@ -365,7 +378,7 @@ func buildJSONEditRequest(r *http.Request) (Request, error) {
 	if input.N > 0 {
 		fields["n"] = fmt.Sprint(input.N)
 	}
-	return buildMultipartEditRequestWithOptions(model, prompt, "", requestedFormat, fields, []imageFile{image})
+	return buildMultipartEditRequestWithOptions(model, prompt, input.Size, requestedFormat, fields, []imageFile{image})
 }
 
 func decodeImageDataURL(value string) (imageFile, error) {
@@ -496,8 +509,8 @@ func validateImageData(data []byte) (imageFile, error) {
 	return imageFile{data: data, contentType: contentType, extension: extension}, nil
 }
 
-func buildMultipartEditRequest(prompt, size string, images []imageFile) (Request, error) {
-	return buildMultipartEditRequestWithOptions(imageModel, prompt, size, responseFormat, nil, images)
+func buildMultipartEditRequest(model, prompt, size string, images []imageFile) (Request, error) {
+	return buildMultipartEditRequestWithOptions(model, prompt, size, responseFormat, nil, images)
 }
 
 func buildMultipartEditRequestWithOptions(model, prompt, size, responseFormat string, fields map[string]string, images []imageFile) (Request, error) {

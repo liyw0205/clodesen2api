@@ -367,7 +367,7 @@ func TestSource(ctx context.Context, selection SourceSelection) (time.Duration, 
 	if err != nil {
 		return 0, err
 	}
-	const checksumURL = "https://github.com/liyw0205/clodesen2api/releases/download/v0.2.16/clodesen2api-linux-amd64.sha256"
+	const checksumURL = "https://github.com/liyw0205/clodesen2api/releases/download/v0.2.18/clodesen2api-linux-amd64.sha256"
 	start := time.Now()
 	body, err := downloadWithClient(ctx, source.rewrite(checksumURL), 4096, clientForSource(sourceHost(source), 15*time.Second))
 	if err != nil {

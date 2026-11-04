@@ -26,6 +26,10 @@
     requestRecordsPage: 1,
     requestRecordsPageSize: 20,
     requestRecordFilters: { model: "", account: "", type: "", status: "" },
+    updateSourceID: "",
+    updateSourceOptions: [],
+    updateSourceResults: {},
+    updateSourceTesting: false,
     settings: null,
   };
 
@@ -79,35 +83,83 @@
   }
 
   function renderUpdateStatus(status) {
-    $("#update-current-version").textContent = status.currentVersion || "未知";
+    const currentVersion = status.currentVersion === "dev" ? "未发布版本" : (status.currentVersion || "未知版本");
+    $("#update-current-version").textContent = currentVersion;
     $("#update-platform").textContent = status.platform || "";
-    $(".sidebar-version").textContent = "Clodesen " + (status.currentVersion || "dev");
+    $(".sidebar-version").textContent = "Clodesen " + currentVersion;
     $("#update-notes").textContent = status.releaseNotes || "";
     $("#update-notes").hidden = !status.releaseNotes;
     $("#update-download").href = status.downloadURL || status.releaseURL || "#";
     $("#update-download").hidden = !status.updateAvailable || status.canInstall;
     $("#update-install").hidden = !status.canInstall;
     if (Array.isArray(status.availableSources)) {
-      const source = $("#update-source");
-      source.replaceChildren(...status.availableSources.map(option => {
-        const node = element("option", "", option.name);
-        node.value = option.id;
-        return node;
-      }));
-      source.value = status.sourceID || "direct";
-      $("#update-custom-wrap").hidden = source.value !== "custom";
+      state.updateSourceOptions = status.availableSources;
+      const sourceID = state.settings?.update?.source || state.updateSourceID || status.sourceID || "direct";
+      renderUpdateSourceOptions(status.availableSources, sourceID);
       $("#update-custom-prefix").value = state.settings?.update?.customPrefix || "";
     }
     if (status.updateAvailable) {
       $("#update-status").textContent = "发现新版本 " + status.latestVersion + (status.canInstall ? "，可直接更新。" : "，请下载对应平台的 ZIP 包。");
     } else {
-      $("#update-status").textContent = status.latestVersion ? "当前已是最新版本 " + status.currentVersion : "未找到可用的发布版本";
+      $("#update-status").textContent = status.latestVersion ? "当前已是最新版本 " + currentVersion : "未找到可用的发布版本";
     }
+  }
+
+  function updateSourceResultText(option, result) {
+    if (!result) {
+      if (option.id === "custom" && !$("#update-custom-prefix").value.trim()) return "填写地址后可测速";
+      return "未测速";
+    }
+    if (result.pending) return "测速中…";
+    if (result.skipped) return "填写地址后可测速";
+    if (result.ok) return "可用 · " + result.latencyMs + " ms";
+    return "不可用";
+  }
+
+  function renderUpdateSourceOptions(options, selectedID) {
+    const container = $("#update-source-options");
+    const known = options.some(option => option.id === selectedID);
+    state.updateSourceID = known ? selectedID : "direct";
+    container.replaceChildren(...options.map(option => {
+      const row = element("label", "update-source-option");
+      row.dataset.sourceId = option.id;
+      const radio = element("input");
+      radio.type = "radio";
+      radio.name = "update-source";
+      radio.value = option.id;
+      radio.checked = option.id === state.updateSourceID;
+      radio.addEventListener("change", () => {
+        state.updateSourceID = option.id;
+        $("#update-custom-wrap").hidden = option.id !== "custom";
+      });
+      const copy = element("span", "update-source-option-copy");
+      const name = element("span", "update-source-option-name", option.name);
+      const result = element("span", "update-source-option-result", updateSourceResultText(option, state.updateSourceResults[option.id]));
+      const saved = state.updateSourceResults[option.id];
+      if (saved?.ok) result.dataset.state = "ok";
+      if (saved && !saved.ok && !saved.pending && !saved.skipped) result.dataset.state = "error";
+      copy.append(name, result);
+      row.append(radio, copy);
+      return row;
+    }));
+    $("#update-custom-wrap").hidden = state.updateSourceID !== "custom";
+  }
+
+  function updateUpdateSourceResult(option, result) {
+    state.updateSourceResults[option.id] = result;
+    const row = Array.from($("#update-source-options").querySelectorAll(".update-source-option"))
+      .find(item => item.dataset.sourceId === option.id);
+    if (!row) return;
+    const output = $(".update-source-option-result", row);
+    output.textContent = updateSourceResultText(option, result);
+    output.dataset.state = result?.ok ? "ok" : result?.pending || result?.skipped ? "" : result ? "error" : "";
+    if (result?.error) output.title = result.error;
+    else output.removeAttribute("title");
   }
 
   function updateSourceSelection() {
     return {
-      source: $("#update-source").value,
+      source: state.updateSourceID || state.settings?.update?.source || "direct",
       customPrefix: $("#update-custom-prefix").value.trim(),
     };
   }
@@ -119,6 +171,7 @@
     try {
       const selection = updateSourceSelection();
       await api("/admin/api/update", { method: "PUT", body: JSON.stringify(selection) });
+      state.updateSourceID = selection.source;
       if (state.settings) state.settings.update = { source: selection.source, customPrefix: selection.customPrefix };
       showToast("更新加速源已保存");
     } catch (error) {
@@ -128,18 +181,39 @@
     }
   }
 
-  async function testUpdateSource() {
-    const button = $("#update-source-test");
+  async function testUpdateSources() {
+    if (state.updateSourceTesting) return;
+    const button = $("#update-source-test-all");
+    const customPrefix = $("#update-custom-prefix").value.trim();
+    const options = state.updateSourceOptions.filter(option => option.id !== "custom" || customPrefix);
+    const custom = state.updateSourceOptions.find(option => option.id === "custom");
+    if (custom && !customPrefix) updateUpdateSourceResult(custom, { skipped: true });
+    state.updateSourceTesting = true;
     button.disabled = true;
-    $("#update-source-result").textContent = "测速中";
-    try {
-      const result = await api("/admin/api/update", { method: "PATCH", body: JSON.stringify(updateSourceSelection()) });
-      $("#update-source-result").textContent = result.ok ? "可用 · " + result.latencyMs + " ms" : "不可用 · " + (result.error || "连接失败");
-    } catch (error) {
-      $("#update-source-result").textContent = error.message;
-    } finally {
-      button.disabled = false;
-    }
+    $("#update-source-save").disabled = true;
+    $("#update-source-result").textContent = "正在测速 0/" + options.length;
+    options.forEach(option => updateUpdateSourceResult(option, { pending: true }));
+    let completed = 0;
+    let available = 0;
+    await Promise.all(options.map(async option => {
+      let result;
+      try {
+        result = await api("/admin/api/update", {
+          method: "PATCH",
+          body: JSON.stringify({ source: option.id, customPrefix }),
+        });
+      } catch (error) {
+        result = { ok: false, error: error.message };
+      }
+      completed += 1;
+      if (result.ok) available += 1;
+      updateUpdateSourceResult(option, result);
+      $("#update-source-result").textContent = "正在测速 " + completed + "/" + options.length;
+    }));
+    state.updateSourceTesting = false;
+    button.disabled = false;
+    $("#update-source-save").disabled = false;
+    $("#update-source-result").textContent = "测速完成：" + available + "/" + options.length + " 个源可用";
   }
 
   async function checkForUpdates(silent = false) {
@@ -366,8 +440,9 @@
     $("#settings-checkin-at").value = settings.checkin?.at || "04:00";
     $("#settings-checkin-timezone").value = settings.checkin?.timezone || "Asia/Shanghai";
     $("#update-custom-prefix").value = settings.update?.customPrefix || "";
-    if (settings.update?.source) $("#update-source").value = settings.update.source;
-    $("#update-custom-wrap").hidden = settings.update?.source !== "custom";
+    state.updateSourceID = settings.update?.source || "builtin:gh-proxy-com";
+    if (state.updateSourceOptions.length) renderUpdateSourceOptions(state.updateSourceOptions, state.updateSourceID);
+    else $("#update-custom-wrap").hidden = state.updateSourceID !== "custom";
     setRedemptionSettingsForm(settings);
   }
 
@@ -480,7 +555,7 @@
     const records = result && Array.isArray(result.records) ? result.records : [];
     const total = result && hasNumber(result.total) ? Number(result.total) : records.length;
     const netCredits = result && result.totals && hasNumber(result.totals.netCredits) ? " · 净消耗 " + formatNumber(result.totals.netCredits) + " 积分" : "";
-    $("#credit-usage-count").textContent = result ? formatNumber(total) + " 条记录" + netCredits : "尚未读取";
+    $("#credit-usage-count").textContent = result ? formatNumber(total) + " 条记录" + netCredits : "等待加载";
     $("#credit-usage-empty").hidden = records.length > 0 || !state.analyticsLoaded;
     $("#credit-usage-table-wrap").hidden = records.length === 0;
     renderCreditPagination(result);
@@ -550,7 +625,7 @@
   }
 
   function requestTypeLabel(type) {
-    return ({ stream: "流式", non_stream: "非流", image: "生图" })[type] || type || "未知";
+    return ({ stream: "流式", non_stream: "非流式", image: "生图" })[type] || type || "未知";
   }
 
   function requestParametersText(parameters) {
@@ -607,7 +682,7 @@
     $("#request-record-failures").textContent = formatNumber(summary.failures);
     $("#request-record-duration").textContent = formatDuration(summary.averageDurationMs);
     $("#request-record-first-token").textContent = formatDuration(summary.averageFirstTokenMs);
-    $("#request-record-updated").textContent = result?.refreshedAt ? "最近读取 " + formatTime(result.refreshedAt) : "最近读取 --";
+    $("#request-record-updated").textContent = result?.refreshedAt ? "最近更新 " + formatTime(result.refreshedAt) : "最近更新 --";
     $("#request-record-count").textContent = result ? formatNumber(result.total) + " 条记录 · 保留最近 7 天" : "最近 7 天";
 
     const rows = $("#request-record-rows");
@@ -763,7 +838,7 @@
       const oldLabel = button.textContent;
       if (!silent) {
         button.disabled = true;
-        button.textContent = "读取中";
+        button.textContent = "加载中";
         $("#model-error").hidden = true;
         $("#credit-usage-error").hidden = true;
       }
@@ -1000,7 +1075,7 @@
       const oldLabel = button.textContent;
       if (!silent) {
         button.disabled = true;
-        button.textContent = "读取中";
+        button.textContent = "刷新中";
       }
       if (!silent && showLoading && !state.accounts.length) {
         $("#loading-state").hidden = false;
@@ -1200,7 +1275,7 @@
 
   function openDeleteDialog(account) {
     state.deletingID = account.id;
-    $("#confirm-copy").textContent = "确定移除 " + account.identifier + "？该账号将立即从轮询池中删除。";
+    $("#confirm-copy").textContent = "确定移除 " + account.identifier + "？该账号将立即从账号列表中删除。";
     confirmDialog.showModal();
   }
 
@@ -1272,8 +1347,6 @@
       setLogin(session.enabled, session.authenticated, session.setupRequired);
       if (session.authenticated) {
         await refresh();
-        // Load the model catalog and cumulative statistics on the first login,
-        // so the analytics view is ready without a manual refresh.
         void loadAnalytics();
         void checkForUpdates(true);
       }
@@ -1352,8 +1425,11 @@
   $("#settings-refresh").addEventListener("click", loadSettings);
   $("#update-check").addEventListener("click", () => checkForUpdates(false));
   $("#update-install").addEventListener("click", installUpdate);
-  $("#update-source").addEventListener("change", event => { $("#update-custom-wrap").hidden = event.currentTarget.value !== "custom"; });
-  $("#update-source-test").addEventListener("click", testUpdateSource);
+  $("#update-source-test-all").addEventListener("click", testUpdateSources);
+  $("#update-custom-prefix").addEventListener("input", () => {
+    const custom = state.updateSourceOptions.find(option => option.id === "custom");
+    if (custom) updateUpdateSourceResult(custom, $("#update-custom-prefix").value.trim() ? null : { skipped: true });
+  });
   $("#update-source-save").addEventListener("click", saveUpdateSource);
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#redemption-settings-save").addEventListener("click", saveRedemptionSettings);

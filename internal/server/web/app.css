@@ -271,10 +271,21 @@ input[type="checkbox"] { width: 17px; min-height: 17px; padding: 0; accent-color
 .request-record-card-field:last-child { grid-column: 1 / -1; }
 .request-record-card-field .field-label { color: var(--muted); font-size: 11px; line-height: 15px; }
 .request-record-card-field strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 18px; font-weight: 500; }
-.update-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 12px; padding: 14px; background: var(--surface); border-radius: 6px; box-shadow: var(--shadow-inset); }
-.update-source-grid label { display: grid; gap: 7px; min-width: 0; color: var(--ink-soft); font-size: 12px; line-height: 16px; font-weight: 600; }
-.update-source-grid select, .update-source-grid input { width: 100%; min-width: 0; }
-.update-source-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; grid-column: 1 / -1; }
+.update-source-panel { display: grid; gap: 12px; min-width: 0; margin: 0; padding: 14px; background: var(--surface); border: 0; border-radius: 6px; box-shadow: var(--shadow-inset); }
+.update-source-panel > legend { padding: 0; color: var(--ink-soft); font-size: 13px; line-height: 18px; font-weight: 650; }
+.update-source-heading { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.update-source-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.update-source-option { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 9px; min-width: 0; min-height: 54px; padding: 8px 10px; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.update-source-option:has(input:checked) { border-color: #82aa91; box-shadow: var(--shadow-inset); }
+.update-source-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }
+.update-source-option-copy { display: grid; gap: 2px; min-width: 0; }
+.update-source-option-name { overflow-wrap: anywhere; color: var(--ink); font-size: 12px; line-height: 16px; font-weight: 650; }
+.update-source-option-result { overflow-wrap: anywhere; color: var(--muted); font-size: 11px; line-height: 14px; font-weight: 450; }
+.update-source-option-result[data-state="ok"] { color: var(--green-dark); }
+.update-source-option-result[data-state="error"] { color: var(--red); }
+.update-custom-input { display: grid; gap: 7px; min-width: 0; color: var(--ink-soft); font-size: 12px; line-height: 16px; font-weight: 600; }
+.update-custom-input input { width: 100%; min-width: 0; }
+.update-source-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .update-source-actions .field-note { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
 .record-status-normal { color: var(--green-dark); font-weight: 600; }
 .record-status-upstream_error { color: var(--red); font-weight: 600; }
@@ -427,8 +438,8 @@ input[type="checkbox"] { accent-color: var(--green); box-shadow: none; }
 }
 
 @media (max-width: 680px) {
-  .update-source-grid { grid-template-columns: minmax(0, 1fr); padding: 12px; }
-  .update-source-actions { grid-column: auto; }
+  .update-source-panel { padding: 12px; }
+  .update-source-options { grid-template-columns: minmax(0, 1fr); }
   .account-card, .model-card, .usage-card, .request-record-card { border-radius: 8px; box-shadow: var(--shadow-small); }
   .dialog-shell { border-radius: 12px 12px 0 0; }
   .dialog-compact { border-radius: 12px; }

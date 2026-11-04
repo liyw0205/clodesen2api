@@ -14,9 +14,9 @@ import (
 	"testing"
 )
 
-func TestBuildGenerationRequestRebuildsPayload(t *testing.T) {
+func TestBuildGenerationRequestPreservesModelAndRebuildsPayload(t *testing.T) {
 	incoming := httptest.NewRequest(http.MethodPost, GenerationsPath+"?ignored=true", strings.NewReader(`{
-		"model":"untrusted-model",
+		"model":"gpt-image-2.5-flare",
 		"prompt":"  draw a cat  ",
 		"n":10,
 		"quality":"high",
@@ -46,7 +46,7 @@ func TestBuildGenerationRequestRebuildsPayload(t *testing.T) {
 		t.Fatalf("decode rebuilt body: %v", err)
 	}
 	wantPayload := generationPayload{
-		Model:          imageModel,
+		Model:          "gpt-image-2.5-flare",
 		Prompt:         "draw a cat",
 		N:              1,
 		Quality:        "auto",
@@ -55,6 +55,22 @@ func TestBuildGenerationRequestRebuildsPayload(t *testing.T) {
 	}
 	if payload != wantPayload {
 		t.Errorf("payload = %#v, want %#v", payload, wantPayload)
+	}
+	if request.Model != wantPayload.Model {
+		t.Errorf("request model = %q, want %q", request.Model, wantPayload.Model)
+	}
+}
+
+func TestBuildGenerationRequestDefaultsModelWhenOmitted(t *testing.T) {
+	incoming := httptest.NewRequest(http.MethodPost, GenerationsPath, strings.NewReader(`{"prompt":"draw a cat"}`))
+	incoming.Header.Set("Content-Type", "application/json")
+
+	request, err := BuildRequest(httptest.NewRecorder(), incoming)
+	if err != nil {
+		t.Fatalf("BuildRequest() error = %v", err)
+	}
+	if request.Model != imageModel {
+		t.Fatalf("request model = %q, want default %q", request.Model, imageModel)
 	}
 }
 
@@ -142,7 +158,7 @@ func TestBuildEditRequestRebuildsMultipartAndSupportsTenImages(t *testing.T) {
 	}
 	defer rebuilt.MultipartForm.RemoveAll()
 
-	if got, want := rebuilt.MultipartForm.Value["model"], []string{imageModel}; !sameStrings(got, want) {
+	if got, want := rebuilt.MultipartForm.Value["model"], []string{"gpt-image-2.5-flare"}; !sameStrings(got, want) {
 		t.Errorf("model = %#v, want %#v", got, want)
 	}
 	if got, want := rebuilt.MultipartForm.Value["prompt"], []string{"draw a cat from the source images"}; !sameStrings(got, want) {
@@ -242,6 +258,41 @@ func TestBuildEditRequestNormalizesGrokJSONDataURLToMultipart(t *testing.T) {
 	}
 }
 
+func TestBuildEditRequestAcceptsJSONForOtherModels(t *testing.T) {
+	payload := map[string]any{
+		"model":  "gpt-image-2.5-flare",
+		"prompt": "  edit this image  ",
+		"image":  map[string]string{"url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(testPNG)},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := httptest.NewRequest(http.MethodPost, EditsPath, bytes.NewReader(body))
+	incoming.Header.Set("Content-Type", "application/json")
+
+	request, err := BuildRequest(httptest.NewRecorder(), incoming)
+	if err != nil {
+		t.Fatalf("BuildRequest() error = %v", err)
+	}
+	if request.Model != "gpt-image-2.5-flare" || request.Prompt != "edit this image" {
+		t.Fatalf("request metadata = model %q prompt %q", request.Model, request.Prompt)
+	}
+	mediaType, _, err := mime.ParseMediaType(request.ContentType)
+	if err != nil || mediaType != "multipart/form-data" {
+		t.Fatalf("content type = %q, parse error = %v", request.ContentType, err)
+	}
+	rebuilt := httptest.NewRequest(http.MethodPost, EditsPath, bytes.NewReader(request.Body))
+	rebuilt.Header.Set("Content-Type", request.ContentType)
+	if err := rebuilt.ParseMultipartForm(1 << 20); err != nil {
+		t.Fatalf("parse rebuilt multipart request: %v", err)
+	}
+	defer rebuilt.MultipartForm.RemoveAll()
+	if got := rebuilt.MultipartForm.Value["model"]; !sameStrings(got, []string{"gpt-image-2.5-flare"}) {
+		t.Fatalf("multipart model = %#v", got)
+	}
+}
+
 func TestBuildEditRequestRejectsMoreThanTenImages(t *testing.T) {
 	_, err := BuildRequest(httptest.NewRecorder(), newEditInput(t, maxImageCount+1))
 	requestErr, ok := AsRequestError(err)
@@ -264,7 +315,7 @@ func newEditInput(t *testing.T, imageCount int) *http.Request {
 		name  string
 		value string
 	}{
-		{name: "model", value: "untrusted-model"},
+		{name: "model", value: "gpt-image-2.5-flare"},
 		{name: "prompt", value: "draw a cat from the source images"},
 		{name: "response_format", value: "url"},
 		{name: "size", value: "1792x1024"},

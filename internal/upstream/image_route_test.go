@@ -26,7 +26,7 @@ func TestForwardAllocatesImageRoute(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode route request: %v", err)
 			}
-			if body.RequestID == "" || body.Path != "/api/openai/v1/images/generations" || body.Model != "gpt-image-2" {
+			if body.RequestID == "" || body.Path != "/api/openai/v1/images/generations" || body.Model != "gpt-image-2.5-flare" {
 				t.Fatalf("unexpected route request: %+v", body)
 			}
 			routeCalls++
@@ -57,9 +57,9 @@ func TestForwardAllocatesImageRoute(t *testing.T) {
 	_, wrote := up.Forward(context.Background(), rec, openai.Request{
 		Method:      http.MethodPost,
 		Path:        openai.GenerationsPath,
-		Model:       "gpt-image-2",
+		Model:       "gpt-image-2.5-flare",
 		ContentType: "application/json",
-		Body:        []byte(`{"model":"gpt-image-2","prompt":"test"}`),
+		Body:        []byte(`{"model":"gpt-image-2.5-flare","prompt":"test"}`),
 	})
 	if !wrote {
 		t.Fatal("Forward did not write a response")

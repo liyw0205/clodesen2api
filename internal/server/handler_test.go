@@ -108,7 +108,7 @@ func TestNewHandlerForwardsOnlyRebuiltAllowedPaths(t *testing.T) {
 		{
 			name: "generation",
 			request: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPost, openai.GenerationsPath+"?client_query=discarded", strings.NewReader(`{"model":"untrusted","prompt":"draw a cat","size":"1792x1024","n":99}`))
+				req := httptest.NewRequest(http.MethodPost, openai.GenerationsPath+"?client_query=discarded", strings.NewReader(`{"model":"gpt-image-2.5-flare","prompt":"draw a cat","size":"1792x1024","n":99}`))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Authorization", "Bearer client-token")
 				return req
@@ -175,7 +175,7 @@ func TestNewHandlerForwardsOnlyRebuiltAllowedPaths(t *testing.T) {
 	if usageSnapshot.TotalRequests != 3 || usageSnapshot.Successes != 3 || usageSnapshot.Failures != 0 {
 		t.Fatalf("usage totals = %+v, want 3 successful generation requests", usageSnapshot)
 	}
-	if len(usageSnapshot.Models) != 2 || usageSnapshot.Models[0].Model != "gpt-image-2" {
+	if len(usageSnapshot.Models) != 2 || usageSnapshot.Models[0].Model != "gpt-image-2.5-flare" {
 		t.Fatalf("usage by model = %+v", usageSnapshot.Models)
 	}
 	requestRecords := stats.RequestRecords()
@@ -188,7 +188,10 @@ func TestNewHandlerForwardsOnlyRebuiltAllowedPaths(t *testing.T) {
 		if record.Endpoint == openai.ChatCompletionsPath && record.Type != "stream" {
 			t.Fatalf("chat request type = %q, want stream", record.Type)
 		}
-		if record.Model == "gpt-image-2" && record.Type != "image" {
+		if (record.Endpoint == openai.GenerationsPath || record.Endpoint == openai.EditsPath) && record.Model != "gpt-image-2.5-flare" {
+			t.Fatalf("image model = %q, want gpt-image-2.5-flare", record.Model)
+		}
+		if record.Model == "gpt-image-2.5-flare" && record.Type != "image" {
 			t.Fatalf("image request type = %q, want image", record.Type)
 		}
 		if record.Endpoint == openai.GenerationsPath && record.Prompt != "draw a cat" {
@@ -344,7 +347,7 @@ func newEditRequest(t *testing.T, imageCount int) *http.Request {
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("model", "untrusted"); err != nil {
+	if err := writer.WriteField("model", "gpt-image-2.5-flare"); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.WriteField("prompt", "draw a cat from the input images"); err != nil {
