@@ -19,6 +19,12 @@
     creditUsageBusy: false,
     creditUsagePage: 1,
     creditUsagePageSize: 20,
+    requestRecords: null,
+    requestRecordsBusy: false,
+    requestRecordsLastRefreshAt: 0,
+    requestRecordsPage: 1,
+    requestRecordsPageSize: 20,
+    requestRecordFilters: { model: "", account: "", type: "", endpoint: "" },
     settings: null,
   };
 
@@ -38,6 +44,7 @@
   const redeemForm = $("#redeem-form");
   const confirmDialog = $("#confirm-dialog");
   const resultDialog = $("#result-dialog");
+  const promptDialog = $("#prompt-dialog");
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -181,11 +188,13 @@
   }
 
   function creditAmountText(record) {
+    if (record.type === "credit_expired") return "过期 " + creditAmount(record.amount) + " 积分";
     return creditDirection(record) + " " + creditAmount(record.amount) + " 积分";
   }
 
   function creditRecordStatus(record) {
     if (record.type === "refund") return "已退回";
+    if (record.type === "credit_expired") return "已过期";
     if (record.status === "completed") return "已完成";
     if (record.status === "refunded") return "已退款";
     return record.status || "--";
@@ -228,9 +237,11 @@
 
   function selectView(view) {
     const analytics = view === "analytics";
+    const records = view === "records";
     const settings = view === "settings";
-    $("#accounts-view").hidden = analytics || settings;
+    $("#accounts-view").hidden = analytics || records || settings;
     $("#analytics-view").hidden = !analytics;
+    $("#records-view").hidden = !records;
     $("#settings-view").hidden = !settings;
     document.querySelectorAll("[data-view]").forEach(button => {
       const selected = button.dataset.view === view;
@@ -238,6 +249,7 @@
       button.tabIndex = selected ? 0 : -1;
     });
     if (analytics) void loadAnalytics(false, true);
+    else if (records) void loadRequestRecords(false);
     else if (settings) void loadSettings();
     else void refresh(false, false, true);
   }
@@ -379,6 +391,7 @@
       const amountClass = amount > 0 ? "credit-positive" : amount < 0 ? "credit-negative" : "credit-neutral";
       const row = element("tr");
       const details = element("td", "credit-record-meta");
+      details.dataset.type = record.type || "unknown";
       details.dataset.status = record.status || "unknown";
       details.append(
         element("span", "credit-meta-badge credit-meta-balance", "余额 " + (hasNumber(record.balanceAfter) ? formatNumber(record.balanceAfter) : "--")),
@@ -436,6 +449,143 @@
       formatPercent(Number(usage.successes || 0) / Number(usage.totalRequests)) : "--";
     $("#usage-latency").textContent = formatDuration(usage.averageLatencyMs);
     $("#usage-period").textContent = usage.startedAt ? "累计统计 · 起始于 " + formatTime(usage.startedAt) : "累计统计";
+  }
+
+  function requestTypeLabel(type) {
+    return ({ stream: "流式", non_stream: "非流", image: "生图" })[type] || type || "未知";
+  }
+
+  function requestParametersText(parameters) {
+    if (!parameters || typeof parameters !== "object" || Object.keys(parameters).length === 0) return "--";
+    return Object.entries(parameters).map(([key, value]) => {
+      let rendered = "";
+      try { rendered = typeof value === "string" ? value : JSON.stringify(value); } catch (_) { rendered = String(value); }
+      if (rendered.length > 100) rendered = rendered.slice(0, 97) + "...";
+      return key + "=" + rendered;
+    }).join(" · ");
+  }
+
+  function requestRecordStatus(record) {
+    return record.success ? "成功" : (record.status ? "失败 · " + record.status : "未响应");
+  }
+
+  function openPromptDialog(record) {
+    $("#request-prompt-text").textContent = record.prompt || "这条记录没有保存提示词。";
+    promptDialog.showModal();
+  }
+
+  function promptAction(record) {
+    const button = element("button", "prompt-button", record.prompt ? "查看提示词" : "无提示词");
+    button.type = "button";
+    button.disabled = !record.prompt;
+    if (record.prompt) button.addEventListener("click", () => openPromptDialog(record));
+    return button;
+  }
+
+  function renderRequestRecords() {
+    const result = state.requestRecords;
+    const records = result && Array.isArray(result.records) ? result.records : [];
+    const summary = result?.summary || {};
+    $("#request-record-total").textContent = formatNumber(summary.total ?? result?.total);
+    $("#request-record-successes").textContent = formatNumber(summary.successes);
+    $("#request-record-failures").textContent = formatNumber(summary.failures);
+    $("#request-record-duration").textContent = formatDuration(summary.averageDurationMs);
+    $("#request-record-first-token").textContent = formatDuration(summary.averageFirstTokenMs);
+    $("#request-record-updated").textContent = result?.refreshedAt ? "最近读取 " + formatTime(result.refreshedAt) : "最近读取 --";
+    $("#request-record-count").textContent = result ? formatNumber(result.total) + " 条记录 · 保留最近 7 天" : "最近 7 天";
+
+    const rows = $("#request-record-rows");
+    const cards = $("#request-record-cards");
+    rows.replaceChildren();
+    cards.replaceChildren();
+    $("#request-record-empty").hidden = records.length > 0 || !result;
+    $("#request-record-table-wrap").hidden = records.length === 0;
+    $("#request-record-cards").hidden = records.length === 0;
+    renderRequestRecordPagination(result);
+    for (const record of records) {
+      const statusClass = record.success ? "record-success" : "record-failure";
+      const params = requestParametersText(record.parameters);
+      const row = element("tr");
+      const firstCell = element("td", "request-record-first-cell");
+      if (record.type === "image") firstCell.append(promptAction(record));
+      else firstCell.textContent = record.firstTokenMs === undefined || record.firstTokenMs === null ? "--" : formatDuration(record.firstTokenMs);
+      const thinkingCell = element("td", "request-record-thinking");
+      if (record.type !== "image") thinkingCell.textContent = record.thinkingLevel || "未指定";
+      row.append(element("td", "request-record-time", formatTime(record.createdAt)),
+        element("td", "model-id request-record-model", record.model || "未指定"),
+        element("td", "request-record-type " + (record.type || ""), requestTypeLabel(record.type)),
+        element("td", "request-record-endpoint", record.endpoint || "--"),
+        element("td", "request-record-account", record.account || record.accountId || "--"),
+        element("td", "request-record-duration-cell", formatDuration(record.durationMs)),
+        firstCell,
+        thinkingCell,
+        element("td", statusClass, requestRecordStatus(record)),
+        element("td", "request-record-parameters", params));
+      rows.append(row);
+
+      const card = element("article", "request-record-card");
+      const top = element("div", "request-record-card-top");
+      top.append(element("strong", "model-id", record.model || "未指定"), element("span", "" + statusClass, requestRecordStatus(record)));
+      const details = element("div", "request-record-card-grid");
+      const fields = [["时间", formatTime(record.createdAt)], ["类型", requestTypeLabel(record.type)], ["端点", record.endpoint || "--"], ["账号", record.account || record.accountId || "--"], ["耗时", formatDuration(record.durationMs)]];
+      if (record.type === "image") fields.push(["提示词", promptAction(record)]);
+      else fields.push(["首字", record.firstTokenMs == null ? "--" : formatDuration(record.firstTokenMs)], ["思考", record.thinkingLevel || "未指定"]);
+      fields.push(["参数", params]);
+      for (const [label, value] of fields) {
+        const item = element("div", "request-record-card-field");
+        item.append(element("span", "field-label", label), value instanceof Node ? value : element("strong", "", value));
+        details.append(item);
+      }
+      card.append(top, details);
+      cards.append(card);
+    }
+  }
+
+  function requestRecordsPath() {
+    const params = new URLSearchParams({ page: String(state.requestRecordsPage), pageSize: String(state.requestRecordsPageSize) });
+    for (const [key, value] of Object.entries(state.requestRecordFilters)) {
+      if (value) params.set(key, value);
+    }
+    return "/admin/api/request-records?" + params.toString();
+  }
+
+  function renderRequestRecordPagination(result) {
+    const pagination = $("#request-record-pagination");
+    const totalPages = result && hasNumber(result.totalPages) ? Number(result.totalPages) : 1;
+    const page = result && hasNumber(result.page) ? Number(result.page) : state.requestRecordsPage;
+    state.requestRecordsPage = page;
+    pagination.hidden = !result || totalPages <= 1;
+    $("#request-page-label").textContent = "第 " + page + " / " + totalPages + " 页";
+    $("#request-prev-page").disabled = page <= 1;
+    $("#request-next-page").disabled = page >= totalPages;
+  }
+
+  async function loadRequestRecords(force = false) {
+    if (state.requestRecordsBusy) return;
+    state.requestRecordsBusy = true;
+    const button = $("#records-refresh");
+    const oldLabel = button.textContent;
+    button.disabled = true;
+    $("#request-record-error").hidden = true;
+    try {
+      state.requestRecords = await api(requestRecordsPath() + (force ? "&refresh=1" : ""));
+      renderRequestRecords();
+    } catch (error) {
+      if (error.message === "登录状态已过期，请重新登录") throw error;
+      $("#request-record-error").textContent = error.message;
+      $("#request-record-error").hidden = false;
+    } finally {
+      button.disabled = false;
+      button.textContent = oldLabel;
+    }
+  }
+
+  function refreshVisibleRequestRecords() {
+    if (dashboard.hidden || document.hidden || $("#records-view").hidden) return;
+    const now = Date.now();
+    if (now - state.requestRecordsLastRefreshAt < 1500) return;
+    state.requestRecordsLastRefreshAt = now;
+    void loadRequestRecords(true);
   }
 
   function creditUsagePath(force = false) {
@@ -1025,6 +1175,31 @@
   $("#refresh-button").addEventListener("click", () => refresh(true, true));
   $("#checkin-all-button").addEventListener("click", event => manualCheckin(null, event.currentTarget));
   $("#analytics-refresh").addEventListener("click", () => loadAnalytics(true));
+  $("#records-refresh").addEventListener("click", () => loadRequestRecords(true));
+  document.addEventListener("visibilitychange", refreshVisibleRequestRecords);
+  window.addEventListener("focus", refreshVisibleRequestRecords);
+  $("#request-record-filters").addEventListener("submit", event => {
+    event.preventDefault();
+    state.requestRecordsPage = 1;
+    state.requestRecordFilters = {
+      model: $("#request-filter-model").value.trim(),
+      account: $("#request-filter-account").value.trim(),
+      type: $("#request-filter-type").value,
+      endpoint: $("#request-filter-endpoint").value.trim(),
+    };
+    void loadRequestRecords(false);
+  });
+  $("#request-prev-page").addEventListener("click", () => {
+    if (state.requestRecordsPage <= 1) return;
+    state.requestRecordsPage -= 1;
+    void loadRequestRecords(false);
+  });
+  $("#request-next-page").addEventListener("click", () => {
+    const totalPages = state.requestRecords && hasNumber(state.requestRecords.totalPages) ? Number(state.requestRecords.totalPages) : 1;
+    if (state.requestRecordsPage >= totalPages) return;
+    state.requestRecordsPage += 1;
+    void loadRequestRecords(false);
+  });
   $("#credit-prev-page").addEventListener("click", () => {
     if (state.creditUsagePage <= 1) return;
     state.creditUsagePage -= 1;

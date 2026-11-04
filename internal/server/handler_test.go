@@ -178,6 +178,29 @@ func TestNewHandlerForwardsOnlyRebuiltAllowedPaths(t *testing.T) {
 	if len(usageSnapshot.Models) != 2 || usageSnapshot.Models[0].Model != "gpt-image-2" {
 		t.Fatalf("usage by model = %+v", usageSnapshot.Models)
 	}
+	requestRecords := stats.RequestRecords()
+	if len(requestRecords) != 3 {
+		t.Fatalf("request records = %d, want 3", len(requestRecords))
+	}
+	types := make(map[string]bool)
+	for _, record := range requestRecords {
+		types[record.Type] = true
+		if record.Endpoint == openai.ChatCompletionsPath && record.Type != "stream" {
+			t.Fatalf("chat request type = %q, want stream", record.Type)
+		}
+		if record.Model == "gpt-image-2" && record.Type != "image" {
+			t.Fatalf("image request type = %q, want image", record.Type)
+		}
+		if record.Endpoint == openai.GenerationsPath && record.Prompt != "draw a cat" {
+			t.Fatalf("generation prompt = %q, want %q", record.Prompt, "draw a cat")
+		}
+		if record.Endpoint == openai.EditsPath && record.Prompt != "draw a cat from the input images" {
+			t.Fatalf("edit prompt = %q, want %q", record.Prompt, "draw a cat from the input images")
+		}
+	}
+	if !types["stream"] || !types["image"] {
+		t.Fatalf("request types = %+v", types)
+	}
 
 	forwarded := forwardCalls.Load()
 	for _, path := range []string{
@@ -234,6 +257,32 @@ func TestRootRedirectsToAdmin(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Location"); got != "/admin/" {
 		t.Fatalf("root redirect = %q, want /admin/", got)
+	}
+}
+
+func TestRejectedImageRequestIsRecorded(t *testing.T) {
+	stats := usage.New()
+	handler := NewHandlerWithUsage(nil, stats)
+	req := httptest.NewRequest(http.MethodPost, openai.GenerationsPath, strings.NewReader(`{"prompt":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	records := stats.RequestRecords()
+	if len(records) != 1 {
+		t.Fatalf("request records = %d, want 1", len(records))
+	}
+	if got, want := records[0].Endpoint, openai.GenerationsPath; got != want {
+		t.Fatalf("endpoint = %q, want %q", got, want)
+	}
+	if got, want := records[0].Type, "image"; got != want {
+		t.Fatalf("type = %q, want %q", got, want)
+	}
+	if records[0].Success || records[0].Status != http.StatusBadRequest {
+		t.Fatalf("record = %+v, want failed 400", records[0])
 	}
 }
 

@@ -29,6 +29,26 @@ type Snapshot struct {
 	Models           []ModelSummary `json:"models"`
 }
 
+// RequestRecord is one client model request. Parameters are a deliberately
+// sanitized summary; only image prompts are retained for panel inspection.
+type RequestRecord struct {
+	ID            int64          `json:"id"`
+	CreatedAt     time.Time      `json:"createdAt"`
+	Model         string         `json:"model"`
+	DurationMS    int64          `json:"durationMs"`
+	FirstTokenMS  *int64         `json:"firstTokenMs,omitempty"`
+	ThinkingLevel string         `json:"thinkingLevel,omitempty"`
+	Prompt        string         `json:"prompt,omitempty"`
+	AccountID     string         `json:"accountId,omitempty"`
+	Account       string         `json:"account,omitempty"`
+	Endpoint      string         `json:"endpoint"`
+	Type          string         `json:"type"`
+	Status        int            `json:"status"`
+	Success       bool           `json:"success"`
+	Error         string         `json:"error,omitempty"`
+	Parameters    map[string]any `json:"parameters,omitempty"`
+}
+
 type counter struct {
 	requests  int64
 	successes int64
@@ -43,8 +63,12 @@ type Collector struct {
 	startedAt   time.Time
 	total       counter
 	byModel     map[string]*counter
+	requests    []RequestRecord
 	persistPath string
 }
+
+const maxRequestRecords = 50000
+const maxRecordPromptRunes = 4096
 
 func New() *Collector {
 	return &Collector{startedAt: time.Now(), byModel: make(map[string]*counter)}
@@ -63,6 +87,7 @@ type persistedCollector struct {
 	StartedAt time.Time                   `json:"startedAt"`
 	Total     persistedCounter            `json:"total"`
 	Models    map[string]persistedCounter `json:"models"`
+	Requests  []RequestRecord             `json:"requests,omitempty"`
 }
 
 // NewPersistent restores cumulative request statistics from path when possible.
@@ -98,7 +123,104 @@ func NewPersistent(path string) (*Collector, error) {
 		value := counterFromPersisted(item)
 		collector.byModel[model] = &value
 	}
+	collector.requests = pruneRequests(saved.Requests, time.Now())
 	return collector, nil
+}
+
+// RecordRequest appends a request-level event and persists it with the
+// aggregate counters. Events are retained for seven days.
+func (c *Collector) RecordRequest(record RequestRecord) {
+	if c == nil {
+		return
+	}
+	now := time.Now()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	if record.ID == 0 {
+		record.ID = record.CreatedAt.UnixNano()
+	}
+	if record.DurationMS < 0 {
+		record.DurationMS = 0
+	}
+	if record.FirstTokenMS != nil && *record.FirstTokenMS < 0 {
+		value := int64(0)
+		record.FirstTokenMS = &value
+	}
+	if len(record.Error) > 512 {
+		record.Error = record.Error[:512]
+	}
+	record.Prompt = truncatePrompt(record.Prompt)
+	record.Parameters = cloneParameters(record.Parameters)
+
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+	c.mu.Lock()
+	c.requests = append(c.requests, record)
+	c.requests = pruneRequests(c.requests, now)
+	saved := c.persistedLocked()
+	c.mu.Unlock()
+	_ = persist(c.persistPath, saved)
+}
+
+func truncatePrompt(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return ""
+	}
+	runes := []rune(prompt)
+	if len(runes) > maxRecordPromptRunes {
+		runes = runes[:maxRecordPromptRunes]
+	}
+	return string(runes)
+}
+
+// RequestRecords returns newest-first request events retained by the collector.
+func (c *Collector) RequestRecords() []RequestRecord {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	result := make([]RequestRecord, len(c.requests))
+	for i, record := range c.requests {
+		result[len(c.requests)-1-i] = cloneRequestRecord(record)
+	}
+	return result
+}
+
+func pruneRequests(records []RequestRecord, now time.Time) []RequestRecord {
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	kept := records[:0]
+	for _, record := range records {
+		if record.CreatedAt.IsZero() || record.CreatedAt.After(cutoff) {
+			kept = append(kept, record)
+		}
+	}
+	if len(kept) > maxRequestRecords {
+		kept = kept[len(kept)-maxRequestRecords:]
+	}
+	return kept
+}
+
+func cloneRequestRecord(record RequestRecord) RequestRecord {
+	record.Parameters = cloneParameters(record.Parameters)
+	if record.FirstTokenMS != nil {
+		value := *record.FirstTokenMS
+		record.FirstTokenMS = &value
+	}
+	return record
+}
+
+func cloneParameters(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]any, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 
 func (c *Collector) Record(model string, status int, duration time.Duration, requestErr error) {
@@ -176,13 +298,17 @@ func (c *Collector) Snapshot() Snapshot {
 
 func (c *Collector) persistedLocked() persistedCollector {
 	saved := persistedCollector{
-		Version:   1,
+		Version:   2,
 		StartedAt: c.startedAt,
 		Total:     persistedFromCounter(c.total),
 		Models:    make(map[string]persistedCounter, len(c.byModel)),
+		Requests:  make([]RequestRecord, len(c.requests)),
 	}
 	for model, item := range c.byModel {
 		saved.Models[model] = persistedFromCounter(*item)
+	}
+	for i, record := range c.requests {
+		saved.Requests[i] = cloneRequestRecord(record)
 	}
 	return saved
 }

@@ -41,6 +41,13 @@ type Request struct {
 	Model       string
 	ContentType string
 	Body        []byte
+	// Stream and ThinkingLevel are normalized request metadata used by the
+	// management request ledger. Image prompts are retained separately so the
+	// panel can inspect them without persisting messages or image bytes.
+	Stream        bool
+	ThinkingLevel string
+	Prompt        string
+	Parameters    map[string]any
 }
 
 // RequestError is a client-facing validation failure.
@@ -118,13 +125,62 @@ func buildChatCompletionRequest(r *http.Request) (Request, error) {
 
 	var model string
 	_ = json.Unmarshal(payload["model"], &model)
+	stream := false
+	_ = json.Unmarshal(payload["stream"], &stream)
 	return Request{
-		Method:      http.MethodPost,
-		Path:        ChatCompletionsPath,
-		Model:       strings.TrimSpace(model),
-		ContentType: "application/json",
-		Body:        body,
+		Method:        http.MethodPost,
+		Path:          ChatCompletionsPath,
+		Model:         strings.TrimSpace(model),
+		ContentType:   "application/json",
+		Body:          body,
+		Stream:        stream,
+		ThinkingLevel: thinkingLevel(payload),
+		Parameters:    requestParameters(payload, "messages", "prompt"),
 	}, nil
+}
+
+func thinkingLevel(payload map[string]json.RawMessage) string {
+	for _, key := range []string{"thinking_level", "reasoning_effort", "thinking"} {
+		var value string
+		if json.Unmarshal(payload[key], &value) == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+		var nested struct {
+			Level string `json:"level"`
+		}
+		if json.Unmarshal(payload[key], &nested) == nil && strings.TrimSpace(nested.Level) != "" {
+			return strings.TrimSpace(nested.Level)
+		}
+	}
+	return ""
+}
+
+func requestParameters(payload map[string]json.RawMessage, excluded ...string) map[string]any {
+	exclude := make(map[string]struct{}, len(excluded))
+	for _, key := range excluded {
+		exclude[key] = struct{}{}
+	}
+	result := make(map[string]any)
+	for key, raw := range payload {
+		if key == "model" || key == "stream" || key == "messages" || key == "prompt" || key == "input" {
+			continue
+		}
+		if _, skip := exclude[key]; skip {
+			continue
+		}
+		var value any
+		if json.Unmarshal(raw, &value) != nil {
+			continue
+		}
+		// Keep controls useful in the ledger while preventing arbitrary client
+		// metadata from becoming a large persisted record.
+		encoded, _ := json.Marshal(value)
+		if len(encoded) > 2048 {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func requireMethod(r *http.Request, method string) error {
@@ -195,6 +251,11 @@ func buildGenerationRequest(r *http.Request) (Request, error) {
 		Model:       imageModel,
 		ContentType: "application/json",
 		Body:        payload,
+		Prompt:      prompt,
+		Parameters: map[string]any{
+			"n": 1, "quality": "auto", "size": input.Size,
+			"response_format": responseFormat,
+		},
 	}, nil
 }
 
@@ -381,5 +442,9 @@ func buildMultipartEditRequest(prompt, size string, images []imageFile) (Request
 		Model:       imageModel,
 		ContentType: writer.FormDataContentType(),
 		Body:        body.Bytes(),
+		Prompt:      prompt,
+		Parameters: map[string]any{
+			"size": size, "image_count": len(images), "response_format": responseFormat,
+		},
 	}, nil
 }

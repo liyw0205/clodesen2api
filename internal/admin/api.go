@@ -64,6 +64,13 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Allow", "GET")
 			writeError(w, http.StatusMethodNotAllowed, "方法不支持")
 		}
+	case r.URL.Path == "/admin/api/request-records":
+		if r.Method == http.MethodGet {
+			s.listRequestRecords(w, r)
+		} else {
+			w.Header().Set("Allow", "GET")
+			writeError(w, http.StatusMethodNotAllowed, "方法不支持")
+		}
 	case r.URL.Path == "/admin/api/redeem" && r.Method == http.MethodPost:
 		s.redeem(w, r)
 	case r.URL.Path == "/admin/api/redemption-history" && r.Method == http.MethodGet:

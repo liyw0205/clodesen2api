@@ -87,6 +87,15 @@ func TestBuildChatCompletionRequestPreservesPayload(t *testing.T) {
 	if got, want := string(request.Body), body; got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
+	if !request.Stream || request.ThinkingLevel != "" {
+		t.Fatalf("request metadata = stream=%v thinking=%q", request.Stream, request.ThinkingLevel)
+	}
+	if _, ok := request.Parameters["messages"]; ok {
+		t.Fatal("request parameters retained messages")
+	}
+	if _, ok := request.Parameters["tools"]; !ok {
+		t.Fatal("request parameters omitted tools")
+	}
 }
 
 func TestBuildChatCompletionRequestRejectsInvalidJSON(t *testing.T) {
@@ -143,6 +152,9 @@ func TestBuildEditRequestRebuildsMultipartAndSupportsTenImages(t *testing.T) {
 	}
 	if got, want := rebuilt.MultipartForm.Value["size"], []string{"1792x1024"}; !sameStrings(got, want) {
 		t.Errorf("size = %#v, want %#v", got, want)
+	}
+	if got, want := request.Parameters["image_count"], maxImageCount; got != want {
+		t.Errorf("image_count parameter = %#v, want %#v", got, want)
 	}
 	if _, ok := rebuilt.MultipartForm.Value["ignored"]; ok {
 		t.Error("unexpected client form field reached rebuilt request")

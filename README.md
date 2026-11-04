@@ -1,6 +1,6 @@
 # clodesen2api
 
-OpenAI-compatible gateway with round-robin, random, and fixed account routing, per-account concurrent request limits, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, credit usage history, and scheduled redemption-code credit resets.
+OpenAI-compatible gateway with round-robin, random, and fixed account routing, per-account concurrent request limits, 30-minute credit-exhaustion cooldown, an administration panel, model pricing, request-level usage records, credit usage history, and scheduled redemption-code credit resets.
 
 ## Download
 
@@ -39,4 +39,4 @@ go vet ./...
 go build ./cmd/clodesen2api
 ```
 
-The administration panel caches upstream account, model, and credit data for 12 hours. Its refresh buttons force a new upstream read. Local successful model requests are recorded immediately and retained for seven days; upstream account transactions periodically calibrate those local estimates.
+The administration panel caches upstream account, model, and credit data for 12 hours. Its refresh buttons force a new upstream read. The usage records page stores request timing, first-byte timing, route, account, request type, thinking level, and sanitized parameter summaries for seven days; upstream account transactions periodically calibrate local credit estimates.

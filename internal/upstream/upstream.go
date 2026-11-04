@@ -59,6 +59,13 @@ type Upstream struct {
 	redemptionRecorder   func(string, RedemptionResult)
 }
 
+// RequestAccountSetter is optionally implemented by the response writer to
+// expose the account selected for the current client request. It keeps account
+// routing metadata out of the public Forward return signature.
+type RequestAccountSetter interface {
+	SetUpstreamAccount(accountID, identifier string)
+}
+
 const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 const (
@@ -890,6 +897,13 @@ func (u *Upstream) releaseAccountRequest(account *Upstream) {
 
 func (u *Upstream) forwardReservedSingle(ctx context.Context, w http.ResponseWriter, request openai.Request, account *Upstream) (error, bool, *bufferedResponse) {
 	defer u.releaseAccountRequest(account)
+	if setter, ok := w.(RequestAccountSetter); ok {
+		identifier := ""
+		if account.cfg != nil {
+			identifier = account.cfg.Auth.Identifier
+		}
+		setter.SetUpstreamAccount(account.accountID, identifier)
+	}
 	return account.forwardSingle(ctx, w, request)
 }
 

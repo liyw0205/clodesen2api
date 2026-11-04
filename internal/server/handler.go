@@ -62,18 +62,35 @@ func NewHandlerWithUsage(up *upstream.Upstream, stats *usage.Collector, adminHan
 	forward := func(w http.ResponseWriter, r *http.Request) {
 		request, err := openai.BuildRequest(w, r)
 		if err != nil {
+			if r.URL.Path != openai.ModelsPath {
+				recordRejectedRequest(stats, r.URL.Path, err)
+			}
 			writeRequestError(w, err)
 			log.Printf("[request] rejected %s %s: %v", r.Method, r.URL.Path, err)
 			return
 		}
 
-		response := &trackingResponseWriter{ResponseWriter: w}
 		start := time.Now()
+		response := &trackingResponseWriter{ResponseWriter: w}
 		var forwardErr error
 		var wrote bool
 		if request.Path != openai.ModelsPath {
 			defer func() {
-				stats.Record(request.Model, response.status, time.Since(start), forwardErr)
+				duration := time.Since(start)
+				stats.Record(request.Model, response.status, duration, forwardErr)
+				var firstTokenMS *int64
+				if requestType(request) != "image" && !response.firstByteAt.IsZero() {
+					value := response.firstByteAt.Sub(start).Milliseconds()
+					firstTokenMS = &value
+				}
+				stats.RecordRequest(usage.RequestRecord{
+					CreatedAt: start, Model: request.Model, DurationMS: duration.Milliseconds(),
+					FirstTokenMS: firstTokenMS, ThinkingLevel: request.ThinkingLevel, Prompt: request.Prompt,
+					AccountID: response.accountID, Account: response.account,
+					Endpoint: request.Path, Type: requestType(request), Status: response.status,
+					Success: response.status >= http.StatusOK && response.status < http.StatusMultipleChoices,
+					Error:   requestErrorText(forwardErr), Parameters: request.Parameters,
+				})
 			}()
 		}
 		forwardErr, wrote = up.Forward(r.Context(), response, request)
@@ -120,7 +137,15 @@ func NewHandlerWithUsage(up *upstream.Upstream, stats *usage.Collector, adminHan
 
 type trackingResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status      int
+	firstByteAt time.Time
+	accountID   string
+	account     string
+}
+
+func (w *trackingResponseWriter) SetUpstreamAccount(accountID, identifier string) {
+	w.accountID = accountID
+	w.account = identifier
 }
 
 func (w *trackingResponseWriter) WriteHeader(status int) {
@@ -134,6 +159,9 @@ func (w *trackingResponseWriter) Write(body []byte) (int, error) {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)
 	}
+	if len(body) > 0 && w.firstByteAt.IsZero() {
+		w.firstByteAt = time.Now()
+	}
 	return w.ResponseWriter.Write(body)
 }
 
@@ -144,6 +172,45 @@ func (w *trackingResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func requestType(request openai.Request) string {
+	if request.Path == openai.GenerationsPath || request.Path == openai.EditsPath {
+		return "image"
+	}
+	if request.Stream {
+		return "stream"
+	}
+	return "non_stream"
+}
+
+func requestErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func recordRejectedRequest(stats *usage.Collector, endpoint string, err error) {
+	if stats == nil {
+		return
+	}
+	status := http.StatusBadRequest
+	if requestErr, ok := openai.AsRequestError(err); ok && requestErr.Status > 0 {
+		status = requestErr.Status
+	}
+	request := openai.Request{Path: endpoint}
+	now := time.Now()
+	stats.Record("未指定", status, 0, err)
+	stats.RecordRequest(usage.RequestRecord{
+		CreatedAt: now,
+		Model:     "未指定",
+		Endpoint:  endpoint,
+		Type:      requestType(request),
+		Status:    status,
+		Success:   false,
+		Error:     requestErrorText(err),
+	})
 }
 
 func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {

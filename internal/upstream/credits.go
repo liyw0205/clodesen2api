@@ -267,6 +267,9 @@ func normalizeCreditType(value string) string {
 		return "refund"
 	}
 	compact := strings.NewReplacer("-", "_", " ", "_").Replace(typeName)
+	if strings.Contains(compact, "expire") || strings.Contains(compact, "expiry") || strings.Contains(compact, "expired") {
+		return "credit_expired"
+	}
 	if strings.Contains(compact, "checkin") || strings.Contains(compact, "check_in") || strings.Contains(compact, "daily_checkin") {
 		return "checkin"
 	}
@@ -282,6 +285,8 @@ func creditRecordModel(typeName, description, transactionModel string) string {
 	}
 	lowerDescription := strings.ToLower(strings.TrimSpace(description))
 	switch normalizeCreditType(typeName) {
+	case "credit_expired":
+		return "限时积分过期"
 	case "checkin":
 		return "签到"
 	case "redeem_code":

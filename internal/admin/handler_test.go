@@ -148,9 +148,15 @@ func TestAdminSessionProtectsAccountDataAndMutation(t *testing.T) {
 		t.Fatalf("credit usage status=%d body=%s", response.StatusCode, body)
 	}
 	stats.Record("gpt-5.6", http.StatusOK, 40*time.Millisecond, nil)
+	firstToken := int64(18)
+	stats.RecordRequest(usage.RequestRecord{Model: "gpt-5.6", Account: "one@example.test", Endpoint: "/v1/chat/completions", Type: "stream", Status: 200, Success: true, DurationMS: 40, FirstTokenMS: &firstToken, ThinkingLevel: "medium", Parameters: map[string]any{"temperature": 0.2}})
 	response, body = requestJSON(t, client, http.MethodGet, server.URL+"/admin/api/usage", "", "")
 	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"totalRequests":1`) || !strings.Contains(body, `"model":"gpt-5.6"`) {
 		t.Fatalf("usage status=%d body=%s", response.StatusCode, body)
+	}
+	response, body = requestJSON(t, client, http.MethodGet, server.URL+"/admin/api/request-records?pageSize=20", "", "")
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"model":"gpt-5.6"`) || !strings.Contains(body, `"firstTokenMs":18`) || !strings.Contains(body, `"thinkingLevel":"medium"`) {
+		t.Fatalf("request records status=%d body=%s", response.StatusCode, body)
 	}
 
 	response, _ = requestJSON(t, client, http.MethodPut, server.URL+"/admin/api/settings", jsonBody(t, map[string]string{"strategy": "random"}), "http://evil.test")
