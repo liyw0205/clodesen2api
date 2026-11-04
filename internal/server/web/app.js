@@ -116,10 +116,27 @@
     return "不可用";
   }
 
+  function updateUpdateSourceTrigger() {
+    const selected = state.updateSourceOptions.find(option => option.id === state.updateSourceID);
+    const label = selected?.name || "直连";
+    const triggerLabel = $("#update-source-current");
+    triggerLabel.textContent = label;
+    triggerLabel.title = label;
+  }
+
+  function updateUpdateSourceControls(sourceID) {
+    const customSelected = sourceID === "custom";
+    $("#update-custom-wrap").hidden = !customSelected;
+    $("#update-source-test-all").hidden = customSelected;
+    $("#update-source-save").hidden = !customSelected;
+  }
+
   function renderUpdateSourceOptions(options, selectedID) {
     const container = $("#update-source-options");
     const known = options.some(option => option.id === selectedID);
     state.updateSourceID = known ? selectedID : "direct";
+    updateUpdateSourceTrigger();
+    updateUpdateSourceControls(state.updateSourceID);
     container.replaceChildren(...options.map(option => {
       const row = element("label", "update-source-option");
       row.dataset.sourceId = option.id;
@@ -130,7 +147,13 @@
       radio.checked = option.id === state.updateSourceID;
       radio.addEventListener("change", () => {
         state.updateSourceID = option.id;
-        $("#update-custom-wrap").hidden = option.id !== "custom";
+        updateUpdateSourceControls(option.id);
+        updateUpdateSourceTrigger();
+        if (option.id === "custom") {
+          $("#update-custom-wrap").scrollIntoView({ block: "nearest" });
+        } else {
+          void saveUpdateSource(false);
+        }
       });
       const copy = element("span", "update-source-option-copy");
       const name = element("span", "update-source-option-name", option.name);
@@ -164,20 +187,24 @@
     };
   }
 
-  async function saveUpdateSource() {
+  async function saveUpdateSource(closeAfterSave = true) {
     const button = $("#update-source-save");
+    const sourceRadios = Array.from($("#update-source-options").querySelectorAll("input[type=radio]"));
     button.disabled = true;
+    sourceRadios.forEach(radio => { radio.disabled = true; });
     $("#update-source-result").textContent = "";
     try {
       const selection = updateSourceSelection();
       await api("/admin/api/update", { method: "PUT", body: JSON.stringify(selection) });
       state.updateSourceID = selection.source;
       if (state.settings) state.settings.update = { source: selection.source, customPrefix: selection.customPrefix };
+      if (closeAfterSave) $("#update-source-disclosure").open = false;
       showToast("更新加速源已保存");
     } catch (error) {
       $("#update-source-result").textContent = error.message;
     } finally {
       button.disabled = false;
+      sourceRadios.forEach(radio => { radio.disabled = false; });
     }
   }
 
@@ -238,7 +265,7 @@
       const result = await api("/admin/api/update", { method: "POST", body: "{}" });
       $("#update-status").textContent = result.message || "更新已安装，服务即将重启";
       showToast($("#update-status").textContent);
-      window.setTimeout(() => window.location.reload(), 3000);
+      window.setTimeout(() => window.location.reload(), 5000);
     } catch (error) {
       $("#update-status").textContent = error.message;
       button.disabled = false;
@@ -1430,7 +1457,18 @@
     const custom = state.updateSourceOptions.find(option => option.id === "custom");
     if (custom) updateUpdateSourceResult(custom, $("#update-custom-prefix").value.trim() ? null : { skipped: true });
   });
-  $("#update-source-save").addEventListener("click", saveUpdateSource);
+  $("#update-source-save").addEventListener("click", () => saveUpdateSource());
+  document.addEventListener("pointerdown", event => {
+    const disclosure = $("#update-source-disclosure");
+    if (disclosure.open && !disclosure.contains(event.target)) disclosure.open = false;
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    const disclosure = $("#update-source-disclosure");
+    if (!disclosure.open) return;
+    disclosure.open = false;
+    disclosure.querySelector("summary").focus();
+  });
   $("#settings-form").addEventListener("submit", saveSettings);
   $("#redemption-settings-save").addEventListener("click", saveRedemptionSettings);
   document.querySelectorAll("[data-view]").forEach(button => {
