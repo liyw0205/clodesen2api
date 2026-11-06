@@ -61,3 +61,9 @@ session-id: 20261107-0207
 - **文件**: VERSION, README.md, docs, .github/workflows/release.yml, THIRD_PARTY_NOTICES.md, Makefile
 - **决策**: VERSION统一版本；main只验证打包，tag发布且不clobber既有发行。说明契约需人工验证、未知用量、单机共享、逐仓储迁移、替换回滚范围和Windows未运行验证。保留可选借鉴项为未来工作。
 - **验证**: 完整测试、最终多平台构建及远端CI待完成，不提前声明发行完成。
+
+## [07:15] - 交付验证: 主实现推送、远端最低Go及race通过
+
+- **文件**: .github/workflows/release.yml, docs/control-plane-implementation.md
+- **决策**: 主提交a65b1b6已推送。发行源码包补齐tests和npm清单；浏览器CI固定Ubuntu24.04，使用runner已安装Chrome，避免apt依赖安装长时间阻塞，并设15分钟上限。
+- **验证**: 本地最终全量Go/vet/浏览器5项及五平台交叉构建通过，320px真实滚动后保存按钮位于视口内。远端42309324867通过Go1.23/stable/vet/Linux race；浏览器安装依赖耗时8分钟尚未测试，该run取消后将用修正工作流重新验证。

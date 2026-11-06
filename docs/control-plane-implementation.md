@@ -27,7 +27,7 @@ criteria: [Chinese implementation plan](codebuddy2api-reference-plan.zh-CN.md).
 - [x] Request-start event, bounded asynchronous audit, degraded-storage visibility.
 - [x] Atomic audit import, owner heartbeat/recovery checks and shared query snapshots.
 - [x] Receipt retention boundary tests and pre-upgrade WAL backup.
-- [ ] Linux race validation in remote CI (Android local runtime lacks race support).
+- [x] Linux race validation in remote CI (Android local runtime lacks race support).
 - [x] End-to-end metadata/denial tests and restart verification.
 - [x] Structured safe error codes, parameter allowlist and per-attempt audit metadata/UI.
 - [x] Response-write panic is recorded as interrupted/failure, including aggregates.
@@ -89,9 +89,16 @@ replacement-process restore path has not run on Windows.
 
 - [x] Local Go tests, vet and five browser flows; four-width screenshot review.
 - [x] Final five-target cross-builds and source diff review.
-- [ ] Staging/secret review before commit.
+- [x] Staging/secret review; task files committed and pushed as `a65b1b6`.
 - [x] VERSION and release notes; main validates/packages, version tag publishes without clobber.
 - [ ] Commit task files, push main/version and verify remote refs/CI.
+
+Remote run [42309324867](https://github.com/liyw0205/clodesen2api/actions/runs/42309324867)
+passed Go 1.23, stable tests/vet and Linux race. Its slow browser dependency
+installation was cancelled; browser CI now uses the runner's installed Chrome
+on a pinned Ubuntu 24.04 image, with a job timeout. Browser/package/release gates
+are still being verified. Source packages include the browser manifests and
+test fixtures so the documented development checks remain runnable.
 
 The working tree also contains pre-existing unrelated binaries, archives and
 browser artifacts. They must not be staged, removed or reverted for this task.

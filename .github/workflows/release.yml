@@ -35,7 +35,8 @@ jobs:
 
   web:
     name: Browser
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -46,8 +47,11 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npx playwright-core install --with-deps chromium
+      - name: Verify runner browser
+        run: google-chrome --version
       - run: npm run test:web
+        env:
+          CHROMIUM_PATH: /usr/bin/google-chrome
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -120,9 +124,9 @@ jobs:
           WINDOWS: ${{ matrix.goos == 'windows' && '1' || '0' }}
         run: |
           cp config.example.toml build/$TARGET/
-          cp README.md Makefile VERSION THIRD_PARTY_NOTICES.md go.mod go.sum build/$TARGET/
+          cp README.md Makefile VERSION THIRD_PARTY_NOTICES.md go.mod go.sum package.json package-lock.json build/$TARGET/
           cp -R docs build/$TARGET/
-          cp -R cmd internal build/$TARGET/
+          cp -R cmd internal tests build/$TARGET/
           if [ "$WINDOWS" = "1" ]; then
             cp start.bat stop.bat restart.bat build/$TARGET/
             (cd build/$TARGET && zip -qr "$GITHUB_WORKSPACE/$ARCHIVE.zip" .)
