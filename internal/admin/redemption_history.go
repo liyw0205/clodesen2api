@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +70,26 @@ func (s *Service) appendRedemptionHistory(record RedemptionHistoryRecord) {
 	if strings.TrimSpace(record.CreatedAt) == "" {
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	if s.control != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		if err := s.control.Mutate(ctx, "redemption-history", func(raw json.RawMessage) (any, error) {
+			var saved redemptionHistoryFile
+			if err := json.Unmarshal(raw, &saved); err != nil {
+				return nil, err
+			}
+			for _, old := range saved.Records {
+				if old.ID == record.ID {
+					return saved, nil
+				}
+			}
+			saved.Records = trimRedemptionHistory(append(saved.Records, record))
+			return saved, nil
+		}); err != nil {
+			log.Printf("[storage] redemption history write failed")
+		}
+		return
+	}
 	s.redemptionMu.Lock()
 	s.redemptionHistory = trimRedemptionHistory(append(s.redemptionHistory, record))
 	if strings.TrimSpace(s.redemptionPath) != "" {
@@ -78,6 +100,16 @@ func (s *Service) appendRedemptionHistory(record RedemptionHistoryRecord) {
 
 func (s *Service) redemptionHistorySnapshot() []RedemptionHistoryRecord {
 	if s == nil {
+		return nil
+	}
+	if s.control != nil {
+		var saved redemptionHistoryFile
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		if _, err := s.control.Load(ctx, "redemption-history", &saved); err == nil {
+			return trimRedemptionHistory(saved.Records)
+		}
+		log.Printf("[storage] redemption history read failed")
 		return nil
 	}
 	s.redemptionMu.Lock()

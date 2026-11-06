@@ -20,10 +20,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"clodesen2api/internal/admission"
 	"clodesen2api/internal/config"
 	"clodesen2api/internal/httpx"
+	"clodesen2api/internal/modelcooldown"
 	"clodesen2api/internal/openai"
 )
 
@@ -53,6 +56,7 @@ type Upstream struct {
 	cooldownUntil        map[*Upstream]time.Time
 	cooldownReason       map[*Upstream]string
 	accountStateRecorder func(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error
+	modelCooldowns       *modelcooldown.Store
 	creditMu             sync.RWMutex
 	creditRecorder       func(CreditUsageRecord)
 	creditPricing        map[string]int64
@@ -65,6 +69,37 @@ type Upstream struct {
 type RequestAccountSetter interface {
 	SetUpstreamAccount(accountID, identifier string)
 }
+
+type RequestAttemptRecorder interface {
+	RecordUpstreamAttempt(accountID, identifier, model string, status int, duration time.Duration, wrote bool, errorCode string)
+}
+
+type attemptResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *attemptResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+func (w *attemptResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+func (w *attemptResponseWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+func (w *attemptResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -129,6 +164,8 @@ func ConfiguredAccounts(cfg *config.Config) ([]AccountCredential, error) {
 
 // NewWithAccounts creates a pool from an explicit account list.
 func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upstream, error) {
+	immutable := *cfg
+	cfg = &immutable
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
 	if strategy == "" {
 		strategy = "fixed"
@@ -184,35 +221,18 @@ func (u *Upstream) SetAccountStateRecorder(recorder func(accountID string, enabl
 	u.poolMu.Unlock()
 }
 
-// ApplyRuntimeConfig updates settings changed from the management panel while
-// preserving existing cookies and account credentials.
+// ApplyRuntimeConfig publishes only pool settings. Session configuration stays
+// immutable; changing connection settings takes effect after restart.
 func (u *Upstream) ApplyRuntimeConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	u.mu.Lock()
-	u.cfg.Server = cfg.Server
-	u.cfg.Upstream = cfg.Upstream
-	u.cfg.Auth.Strategy = cfg.Auth.Strategy
-	u.cfg.Auth.RPM = cfg.Auth.RPM
-	u.cfg.Auth.AutoRelogin = cfg.Auth.AutoRelogin
-	u.cfg.Checkin = cfg.Checkin
-	u.mu.Unlock()
 	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
 	if strategy == "round_robin" || strategy == "random" || strategy == "fixed" {
 		u.poolMu.Lock()
 		u.strategy = strategy
 		u.rpmLimit = configuredRPM(cfg.Auth.RPM)
 		u.poolMu.Unlock()
-	}
-	accounts := u.accountsSnapshot()
-	for _, account := range accounts {
-		account.mu.Lock()
-		account.cfg.Server = cfg.Server
-		account.cfg.Upstream = cfg.Upstream
-		account.cfg.Auth.AutoRelogin = cfg.Auth.AutoRelogin
-		account.cfg.Checkin = cfg.Checkin
-		account.mu.Unlock()
 	}
 }
 
@@ -313,6 +333,8 @@ func accountIDFor(identifier string) string {
 }
 
 func newSession(cfg *config.Config) (*Upstream, error) {
+	immutable := *cfg
+	cfg = &immutable
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, fmt.Errorf("new cookie jar: %w", err)
@@ -472,19 +494,19 @@ func (u *Upstream) Login(ctx context.Context) error {
 		u.loggedIn = false
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, respBody); ok {
 			retryable := &safeAccountRetryError{
-				err:            fmt.Errorf("login failed: upstream status %d, body=%s", resp.StatusCode, string(respBody)),
+				err:            fmt.Errorf("login failed: upstream status %d", resp.StatusCode),
 				cooldownUntil:  restriction.cooldownUntil,
 				disableAccount: restriction.disableAccount,
 			}
 			u.restrictionOwner().applyAccountRetryError(u, retryable)
 			return retryable
 		}
-		return fmt.Errorf("login failed: upstream status %d, body=%s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("login failed: upstream status %d", resp.StatusCode)
 	}
 	if restriction, ok := detectAccountRestriction(resp.StatusCode, respBody); ok {
 		u.loggedIn = false
 		retryable := &safeAccountRetryError{
-			err:            fmt.Errorf("login rejected by upstream: body=%s", string(respBody)),
+			err:            errors.New("login rejected by upstream"),
 			cooldownUntil:  restriction.cooldownUntil,
 			disableAccount: restriction.disableAccount,
 		}
@@ -578,21 +600,21 @@ func (u *Upstream) allocateImageRoute(ctx context.Context, host, openAIBaseURL s
 		upstreamResponse := &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 			return imageRoute{}, &safeAccountRetryError{
-				err:            fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body)),
+				err:            fmt.Errorf("image route failed: upstream status %d", resp.StatusCode),
 				response:       upstreamResponse,
 				cooldownUntil:  restriction.cooldownUntil,
 				disableAccount: restriction.disableAccount,
 			}
 		}
 		return imageRoute{}, &safeAccountRetryError{
-			err:      fmt.Errorf("image route failed: upstream status %d, body=%s", resp.StatusCode, string(body)),
+			err:      fmt.Errorf("image route failed: upstream status %d", resp.StatusCode),
 			response: upstreamResponse,
 		}
 	}
 
 	var route computeRouteResponse
 	if err := json.Unmarshal(body, &route); err != nil {
-		return imageRoute{}, fmt.Errorf("decode image route response: %w (body=%s)", err, string(body))
+		return imageRoute{}, fmt.Errorf("decode image route response: %w", err)
 	}
 	if !route.Enabled {
 		return imageRoute{targetURL: openAIBaseURL + request.Path}, nil
@@ -628,6 +650,11 @@ func isImageRequest(path string) bool {
 // 若上游回 401 且开启 auto-relogin，会重新登录后重试一次。
 // 第二个返回值 wrote 表示响应头是否已经写给客户端（用于错误处理）。
 func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request openai.Request) (error, bool) {
+	var budget atomic.Int32
+	budget.Store(int32(admission.Limits(ctx).MaxAttempts))
+	ctx = context.WithValue(ctx, attemptBudgetKey{}, &budget)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(admission.Limits(ctx).RequestTimeoutSeconds)*time.Second)
+	defer cancel()
 	if len(u.accountsSnapshot()) == 0 {
 		if u.poolMode {
 			return &NoAccountAvailableError{}, false
@@ -641,9 +668,18 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request o
 		if !u.reserveAccountRequest(u) {
 			return &NoAccountAvailableError{RetryAfter: u.rpmRetryAfter()}, false
 		}
+		if wait := u.modelCooldownRemaining(ctx, request.Model); wait > 0 {
+			u.releaseAccountRequest(u)
+			return &NoAccountAvailableError{RetryAfter: wait}, false
+		}
 		err, wrote, insufficient := u.forwardReservedSingle(ctx, w, request, u)
 		if err != nil {
 			u.applyAccountRetryError(u, err)
+			var retryable *safeAccountRetryError
+			if !wrote && errors.As(err, &retryable) && retryable.response != nil {
+				retryable.response.writeTo(w)
+				return nil, true
+			}
 		}
 		if insufficient != nil {
 			insufficient.writeTo(w)
@@ -714,11 +750,23 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 	var lastErr error
 	attempted := 0
 	for _, candidate := range candidates {
+		if attempted >= admission.Limits(ctx).MaxAttempts {
+			break
+		}
+		if wait := candidate.account.modelCooldownRemaining(ctx, request.Model); wait > 0 {
+			if retryAfter <= 0 || wait < retryAfter {
+				retryAfter = wait
+			}
+			continue
+		}
 		if !u.reserveAccountRequest(candidate.account) {
 			continue
 		}
 		attempted++
 		err, wrote, creditResponse := u.forwardReservedSingle(ctx, w, request, candidate.account)
+		if err != nil && wrote {
+			return err, true
+		}
 		if creditResponse != nil {
 			insufficient = creditResponse
 			u.coolDown(candidate.account)
@@ -766,7 +814,9 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 		return nil, true
 	}
 	if attempted == 0 {
-		_, retryAfter = u.selectAccounts()
+		if retryAfter <= 0 {
+			_, retryAfter = u.selectAccounts()
+		}
 		return &NoAccountAvailableError{RetryAfter: retryAfter}, false
 	}
 	if lastErr != nil {
@@ -897,14 +947,41 @@ func (u *Upstream) releaseAccountRequest(account *Upstream) {
 
 func (u *Upstream) forwardReservedSingle(ctx context.Context, w http.ResponseWriter, request openai.Request, account *Upstream) (error, bool, *bufferedResponse) {
 	defer u.releaseAccountRequest(account)
+	identifier := ""
+	if account.cfg != nil {
+		identifier = account.cfg.Auth.Identifier
+	}
 	if setter, ok := w.(RequestAccountSetter); ok {
-		identifier := ""
-		if account.cfg != nil {
-			identifier = account.cfg.Auth.Identifier
-		}
 		setter.SetUpstreamAccount(account.accountID, identifier)
 	}
-	return account.forwardSingle(ctx, w, request)
+	started := time.Now()
+	tracked := &attemptResponseWriter{ResponseWriter: w}
+	err, wrote, buffered := account.forwardSingle(ctx, tracked, request)
+	if recorder, ok := w.(RequestAttemptRecorder); ok {
+		status := tracked.status
+		if buffered != nil {
+			status = buffered.status
+		}
+		var retryable *safeAccountRetryError
+		if errors.As(err, &retryable) && retryable.response != nil {
+			status = retryable.response.status
+		}
+		code := ""
+		if status >= 400 {
+			code = fmt.Sprintf("upstream_http_%d", status)
+		}
+		if err != nil {
+			code = "upstream_attempt_failed"
+		}
+		if errors.Is(err, context.Canceled) {
+			code = "client_cancelled"
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "upstream_timeout"
+		}
+		recorder.RecordUpstreamAttempt(account.accountID, identifier, request.Model, status, time.Since(started), wrote, code)
+	}
+	return err, wrote, buffered
 }
 
 func (u *Upstream) rpmRetryAfter() time.Duration {
@@ -1169,6 +1246,9 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 	}
 
 	doForward := func() (*http.Response, error) {
+		if err := consumeAttempt(ctx); err != nil {
+			return nil, err
+		}
 		route := imageRoute{targetURL: openAIBaseURL + request.Path}
 		if isImageRequest(request.Path) {
 			var err error
@@ -1191,7 +1271,7 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 			req.Header.Set("X-Qx-Request-Id", route.requestID)
 			req.Header.Set("Idempotency-Key", route.requestID)
 		}
-		return u.httpClient.Do(req)
+		return timedDo(u.httpClient, req)
 	}
 
 	forwardWithRouteRetry := func() (*http.Response, error) {
@@ -1234,14 +1314,15 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 	// 把上游响应原样回写给客户端（含流式 SSE）
 	streaming := strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
 	if !streaming {
-		body, readErr := io.ReadAll(resp.Body)
+		body, readErr := readResponse(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return wrapSafeAccountRetryError("read upstream body", readErr), false, nil
+			return fmt.Errorf("read upstream body: %w", readErr), false, nil
 		}
+		admission.ReportUsage(ctx, body)
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 			return &safeAccountRetryError{
-				err:            fmt.Errorf("upstream account restricted: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body))),
+				err:            fmt.Errorf("upstream account restricted: status=%d", resp.StatusCode),
 				response:       &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body},
 				cooldownUntil:  restriction.cooldownUntil,
 				disableAccount: restriction.disableAccount,
@@ -1251,8 +1332,11 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 			return nil, false, &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
 		}
 		if retryableUpstreamStatus(resp.StatusCode) {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				u.recordModelCooldown(request.Model, resp.Header.Get("Retry-After"))
+			}
 			return &safeAccountRetryError{
-				err:      fmt.Errorf("upstream returned retryable status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+				err:      fmt.Errorf("upstream returned retryable status %d", resp.StatusCode),
 				response: &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body},
 			}, false, nil
 		}
@@ -1262,19 +1346,25 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		if rewritten, changed := httpx.RewriteJSONImageURLs(body, u.imageBaseURL()); changed {
 			body = rewritten
 		}
+		if openai.IsMapped(request) {
+			body = openai.ResponseModel(body, request.PublicModel)
+		}
 		httpx.CopyHeaders(w.Header(), resp.Header)
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(body)
+		if _, err := w.Write(body); err != nil {
+			return fmt.Errorf("write upstream response: %w", err), true, nil
+		}
 		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			u.recordLocalCredit(request)
 		}
 		return nil, true, nil
 	}
 
+	resp.Body = &usageBody{ReadCloser: resp.Body, ctx: ctx}
 	reader := bufio.NewReader(resp.Body)
 	if resp.StatusCode == http.StatusPaymentRequired {
-		body, readErr := io.ReadAll(reader)
+		body, readErr := readResponse(reader)
 		_ = resp.Body.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("read upstream body: %w", readErr), false, nil
@@ -1284,11 +1374,14 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 	prefix, prefixErr := readSSEPrefix(reader)
 	if prefixErr != nil && !errors.Is(prefixErr, io.EOF) {
 		_ = resp.Body.Close()
-		return wrapSafeAccountRetryError("read upstream stream", prefixErr), false, nil
+		return fmt.Errorf("read upstream stream: %w", prefixErr), false, nil
 	}
 	if restriction, ok := detectAccountRestriction(resp.StatusCode, prefix); ok {
-		body, _ := io.ReadAll(reader)
+		body, readErr := readResponse(reader)
 		_ = resp.Body.Close()
+		if readErr != nil {
+			return readErr, false, nil
+		}
 		return &safeAccountRetryError{
 			err:           fmt.Errorf("upstream account restricted: status=%d", resp.StatusCode),
 			response:      &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: append(prefix, body...)},
@@ -1296,8 +1389,14 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		}, false, nil
 	}
 	if retryableUpstreamStatus(resp.StatusCode) {
-		body, _ := io.ReadAll(reader)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			u.recordModelCooldown(request.Model, resp.Header.Get("Retry-After"))
+		}
+		body, readErr := readResponse(reader)
 		_ = resp.Body.Close()
+		if readErr != nil {
+			return readErr, false, nil
+		}
 		return &safeAccountRetryError{
 			err: fmt.Errorf("upstream returned retryable status %d", resp.StatusCode),
 			response: &bufferedResponse{
@@ -1307,8 +1406,11 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		}, false, nil
 	}
 	if insufficientCredits(resp.StatusCode, prefix) {
-		body, _ := io.ReadAll(reader)
+		body, readErr := readResponse(reader)
 		_ = resp.Body.Close()
+		if readErr != nil {
+			return readErr, false, nil
+		}
 		return nil, false, &bufferedResponse{
 			header: resp.Header.Clone(), status: resp.StatusCode,
 			body: append(prefix, body...),
@@ -1320,17 +1422,20 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 	if flusher, ok := w.(http.Flusher); ok {
 		writer = flushingWriter{writer: w, flusher: flusher}
 	}
-	if len(prefix) > 0 {
-		if _, err := writer.Write(prefix); err != nil {
-			_ = resp.Body.Close()
-			return nil, true, nil
+	if openai.IsMapped(request) {
+		err = openai.CopyModelStream(writer, io.MultiReader(bytes.NewReader(prefix), reader), request.PublicModel)
+	} else {
+		if len(prefix) > 0 {
+			if _, err := writer.Write(prefix); err != nil {
+				_ = resp.Body.Close()
+				return fmt.Errorf("write upstream stream: %w", err), true, nil
+			}
 		}
+		_, err = io.Copy(writer, reader)
 	}
-	_, err = io.Copy(writer, resp.Body)
 	_ = resp.Body.Close()
 	if err != nil && !errors.Is(err, io.EOF) {
-		// 客户端断开之类，不再处理
-		return nil, true, nil
+		return fmt.Errorf("copy upstream stream: %w", err), true, nil
 	}
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		u.recordLocalCredit(request)
@@ -1682,18 +1787,18 @@ func (u *Upstream) checkinOnce(ctx context.Context, method, host string, withMon
 	if resp.StatusCode/100 != 2 {
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 			retryable := &safeAccountRetryError{
-				err:            fmt.Errorf("checkin %s failed: status=%d body=%s", method, resp.StatusCode, string(body)),
+				err:            fmt.Errorf("checkin %s failed: status=%d", method, resp.StatusCode),
 				cooldownUntil:  restriction.cooldownUntil,
 				disableAccount: restriction.disableAccount,
 			}
 			u.restrictionOwner().applyAccountRetryError(u, retryable)
 			return res, retryable
 		}
-		return res, fmt.Errorf("checkin %s failed: status=%d body=%s", method, resp.StatusCode, string(body))
+		return res, fmt.Errorf("checkin %s failed: status=%d", method, resp.StatusCode)
 	}
 	if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 		retryable := &safeAccountRetryError{
-			err:            fmt.Errorf("checkin %s rejected by upstream: body=%s", method, string(body)),
+			err:            fmt.Errorf("checkin %s rejected by upstream", method),
 			cooldownUntil:  restriction.cooldownUntil,
 			disableAccount: restriction.disableAccount,
 		}
@@ -1701,7 +1806,7 @@ func (u *Upstream) checkinOnce(ctx context.Context, method, host string, withMon
 		return res, retryable
 	}
 	if err := json.Unmarshal(body, &res); err != nil {
-		return res, fmt.Errorf("decode checkin response: %w (body=%s)", err, string(body))
+		return res, fmt.Errorf("decode checkin response: %w", err)
 	}
 	var balanceField struct {
 		Balance      *int64 `json:"balance"`

@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"strings"
@@ -40,6 +41,7 @@ type Request struct {
 	// Model is used by upstream routing for image requests. It is not
 	// user-controlled because image requests are normalized below.
 	Model       string
+	PublicModel string
 	ContentType string
 	Body        []byte
 	// Stream and ThinkingLevel are normalized request metadata used by the
@@ -49,6 +51,23 @@ type Request struct {
 	ThinkingLevel string
 	Prompt        string
 	Parameters    map[string]any
+}
+
+// BodyBudget is a conservative reservation covering input and rebuilt buffers.
+func BodyBudget(path string, contentLength int64) int64 {
+	var maximum int64 = maxChatBodyBytes
+	switch path {
+	case ModelsPath:
+		return 0
+	case GenerationsPath:
+		maximum = maxJSONBodyBytes
+	case EditsPath:
+		maximum = maxEditBodyBytes
+	}
+	if contentLength >= 0 && contentLength < maximum {
+		maximum = contentLength
+	}
+	return 8 * maximum
 }
 
 // RequestError is a client-facing validation failure.
@@ -162,6 +181,7 @@ func requestParameters(payload map[string]json.RawMessage, excluded ...string) m
 		exclude[key] = struct{}{}
 	}
 	result := make(map[string]any)
+	allowed := map[string]bool{"temperature": true, "top_p": true, "max_tokens": true, "max_completion_tokens": true, "presence_penalty": true, "frequency_penalty": true, "n": true, "seed": true, "logprobs": true, "top_logprobs": true, "parallel_tool_calls": true, "reasoning_effort": true, "thinking_level": true, "size": true, "quality": true, "response_format": true, "aspect_ratio": true, "resolution": true}
 	for key, raw := range payload {
 		if key == "model" || key == "stream" || key == "messages" || key == "prompt" || key == "input" {
 			continue
@@ -169,8 +189,48 @@ func requestParameters(payload map[string]json.RawMessage, excluded ...string) m
 		if _, skip := exclude[key]; skip {
 			continue
 		}
+		if key == "tools" {
+			var tools []json.RawMessage
+			if json.Unmarshal(raw, &tools) == nil {
+				result["tool_count"] = len(tools)
+			}
+			continue
+		}
+		if key == "response_format" {
+			var format struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(raw, &format) == nil && (format.Type == "json_schema" || format.Type == "json_object" || format.Type == "text") {
+				result["response_format"] = format.Type
+				continue
+			}
+		}
+		if !allowed[key] {
+			continue
+		}
 		var value any
 		if json.Unmarshal(raw, &value) != nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case float64, bool:
+		case string:
+			if len(typed) > 64 {
+				continue
+			}
+			switch key {
+			case "reasoning_effort", "thinking_level":
+				if typed != "none" && typed != "minimal" && typed != "low" && typed != "medium" && typed != "high" && typed != "xhigh" {
+					continue
+				}
+			case "quality", "response_format", "size", "aspect_ratio", "resolution":
+				if strings.ContainsAny(typed, " \t\n\r") {
+					continue
+				}
+			default:
+				continue
+			}
+		default:
 			continue
 		}
 		// Keep controls useful in the ledger while preventing arbitrary client
@@ -277,14 +337,21 @@ func buildEditRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxEditBodyBytes)
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
 	if err := r.ParseMultipartForm(maxMultipartMemory); err != nil {
+		if isReadTimeout(err) {
+			return Request{}, &RequestError{Status: http.StatusRequestTimeout, Message: "request body read timed out"}
+		}
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			return Request{}, &RequestError{Status: http.StatusRequestEntityTooLarge, Message: "multipart request body is too large"}
 		}
 		return Request{}, &RequestError{Status: http.StatusBadRequest, Message: "invalid multipart request body"}
 	}
-	defer r.MultipartForm.RemoveAll()
 
 	prompt, err := requiredFormValue(r.MultipartForm.Value, "prompt")
 	if err != nil {
@@ -424,12 +491,20 @@ func readBody(body io.ReadCloser, maxBytes int64) ([]byte, error) {
 	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
 	if err != nil {
+		if isReadTimeout(err) {
+			return nil, &RequestError{Status: http.StatusRequestTimeout, Message: "request body read timed out"}
+		}
 		return nil, &RequestError{Status: http.StatusBadRequest, Message: "unable to read request body"}
 	}
 	if int64(len(data)) > maxBytes {
 		return nil, &RequestError{Status: http.StatusRequestEntityTooLarge, Message: "request body is too large"}
 	}
 	return data, nil
+}
+
+func isReadTimeout(err error) bool {
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func validatePrompt(value string) (string, error) {

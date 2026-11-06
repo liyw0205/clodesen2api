@@ -41,6 +41,17 @@ token_file = "data/admin.token"
 # 后台维护的多账号数据文件，权限会限制为仅当前用户可读写。
 accounts_file = "data/accounts.json"
 
+[api]
+# 客户端调用 /v1/* 时使用的外部兼容 key；留空表示仅使用下方 key 文件中的 key。
+# 该 key 只建议作为迁移/紧急兼容入口，日常应在后台为每个客户端创建独立 key。
+key = ""
+# 客户端 key 的 owner-only 存储文件；明文 key 不落盘，只保存 SHA-256。
+keys_file = "data/api-keys.json"
+# 只有在没有任何 key 时才允许匿名调用，生产环境应保持 false。
+allow_no_auth = false
+# 若服务位于反向代理后，可填写可信代理 IP/CIDR（逗号分隔），用于后续 IP 限制校验。
+trusted_proxies = ""
+
 # 多账号配置示例：
 # accounts = "user1@example.com:password1,user2@example.com:password2"
 

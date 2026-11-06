@@ -1,0 +1,332 @@
+const { test, before, after } = require("node:test");
+const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
+const { existsSync, mkdirSync } = require("node:fs");
+if (process.platform === "android") process.env.PLAYWRIGHT_BROWSERS_PATH ||= "0";
+const { chromium } = require("playwright-core");
+
+let fixture, browser, base;
+const failures = [];
+
+test("shared admission settings, request quota and persistent job UI", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await page.locator("#settings-tab").click();
+  await page.waitForFunction(() => document.querySelector("#admission-maxConcurrent").value !== "");
+  await page.waitForFunction(() => document.querySelector("#settings-account-rpm").value !== "");
+  await page.locator("#settings-account-rpm").fill("5");
+  await page.locator("#settings-server-addr").fill("127.0.0.1:7788");
+  await page.locator("#settings-save").click();
+  await page.waitForFunction(() => document.querySelector("#settings-server-addr").closest("label").textContent.includes("待重启"));
+  const settings = await (await context.request.get(base + "/admin/api/config")).json();
+  assert.equal(settings.auth.rpm, 5);
+  assert.equal(settings.fields["server.addr"].effective, "127.0.0.1:0");
+  assert.equal(settings.fields["auth.rpm"].mode, "hot");
+  assert.equal(settings.redemption.code, "");
+  const stale = await context.request.put(base + "/admin/api/config", { data: { ...settings, revision: settings.revision - 1 } });
+  assert.equal(stale.status(), 409);
+  await page.locator("#admission-maxConcurrent").fill("20");
+  await page.getByRole("button", { name: "保存准入设置", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("#admission-maxConcurrent").value === "20" && !document.querySelector("#admission-maxConcurrent").form.querySelector("button").disabled);
+  const limits = await (await context.request.get(base + "/admin/api/admission")).json();
+  assert.equal(limits.settings.maxConcurrent, 20);
+  await page.getByRole("button", { name: "创建完整备份", exact: true }).click();
+  await page.locator("#storage-panel a[download]").first().waitFor();
+  const archive = await context.request.get(base + await page.locator("#storage-panel a[download]").first().getAttribute("href"));
+  assert.equal(archive.status(), 200);
+  const archiveBytes = await archive.body();
+  await page.locator("#backup-upload").setInputFiles({ name: "restore.zip", mimeType: "application/zip", buffer: archiveBytes });
+  await page.waitForFunction(() => document.querySelector("#backup-validation").textContent.includes("已验证"));
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.locator("#storage-panel").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: "test-results/storage-" + width + ".png", fullPage: true });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator("#keys-tab").click();
+  await page.locator("#keys-create").click();
+  await page.locator("#key-name").fill("Quota browser key");
+  await page.locator("#key-concurrent").fill("1");
+  await page.locator("#key-daily").fill("1");
+  await page.locator("#key-save").click();
+  await page.locator("#key-secret-dialog").waitFor({ state: "visible" });
+  const secret = await page.locator("#key-secret").inputValue();
+  await page.locator("[data-close='key-secret-dialog']").last().click();
+  const infer = () => context.request.post(base + "/v1/chat/completions", { headers: { Authorization: "Bearer " + secret }, data: { model: "allowed-model", messages: [] } });
+  assert.equal((await infer()).status(), 200);
+  assert.equal((await infer()).status(), 429);
+  await page.locator("#keys-refresh").click();
+  await page.waitForFunction(() => document.querySelector("#keys-rows").textContent.includes("日请求 1 / 1"));
+  const key = (await (await context.request.get(base + "/admin/api/keys")).json()).keys.find(item => item.name === "Quota browser key");
+  await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
+  await page.locator("#accounts-tab").click();
+  await page.locator("#checkin-all-button").click();
+  await page.waitForFunction(() => document.querySelectorAll("#jobs-panel .job-row").length > 0);
+  await page.reload();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelectorAll("#jobs-panel .job-row").length > 0);
+  const jobs = (await (await context.request.get(base + "/admin/api/jobs")).json()).jobs;
+  assert.ok(jobs.some(job => job.kind === "checkin"));
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.screenshot({ path: "test-results/jobs-" + width + ".png", fullPage: true });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  }
+  assert.deepEqual(failures, []);
+  await context.close();
+});
+before(async () => {
+  fixture = spawn("go", ["run", "./tests/webfixture"], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  base = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Fixture startup timed out: " + output)), 30000);
+    fixture.stdout.on("data", data => {
+      output += data;
+      const match = output.match(/WEB_FIXTURE_URL=(http:\/\/\S+)/);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+    fixture.stderr.on("data", data => { output += data; });
+    fixture.on("exit", code => { clearTimeout(timer); reject(new Error("Fixture exited: " + code + " " + output)); });
+  });
+  const executablePath = process.env.CHROMIUM_PATH || ["/data/data/com.termux/files/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome"].find(existsSync);
+  browser = await chromium.launch({ executablePath, headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] });
+});
+after(async () => {
+  if (browser) await browser.close();
+  if (fixture && fixture.exitCode === null) {
+    try { process.kill(-fixture.pid, "SIGTERM"); } catch {}
+    await new Promise(resolve => fixture.once("exit", resolve));
+  }
+});
+
+test("key lifecycle, policy, audit, conflict and responsive UI", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await page.locator("#keys-tab").click();
+  await page.locator("#keys-empty").waitFor({ state: "visible" });
+  await page.locator("#keys-create").click();
+  await page.locator("#key-name").fill("Browser client <script>");
+  await page.locator("#key-rpm").fill("1");
+  await page.locator("#key-ip").fill("127.0.0.1");
+  await page.locator("#key-models option[value='allowed-model']").waitFor({ state: "attached" });
+  await page.locator("#key-models").selectOption(["allowed-model"]);
+  await page.locator("#key-save").click();
+  await page.locator("#key-secret-dialog").waitFor({ state: "visible" });
+  const secret = await page.locator("#key-secret").inputValue();
+  assert.match(secret, /^sk-[a-f0-9]{32}$/);
+  await page.locator("[data-close='key-secret-dialog']").last().click();
+  assert.equal(await page.locator("#key-secret").inputValue(), "");
+  await page.waitForFunction(() => document.querySelectorAll("#keys-rows tr").length === 1);
+  const list = await (await context.request.get(base + "/admin/api/keys")).json();
+  const id = list.keys[0].id;
+  assert.equal(JSON.stringify(list).includes(secret), false);
+  const infer = async (model, token = secret) => {
+    const response = await context.request.post(base + "/v1/chat/completions", { headers: { Authorization: "Bearer " + token }, data: { model, messages: [{ role: "user", content: "hello" }] } });
+    return { status: response.status(), body: await response.json(), headers: response.headers() };
+  };
+  assert.equal((await infer("allowed-model")).status, 200);
+  assert.equal((await infer("other-model")).status, 403);
+  const limited = await infer("allowed-model");
+  assert.equal(limited.status, 429); assert.ok(limited.headers["retry-after"]);
+  await page.locator("#keys-rows").getByRole("button", { name: "停用", exact: true }).click();
+  await page.locator("#keys-rows").getByRole("button", { name: "启用", exact: true }).waitFor();
+  assert.equal((await infer("allowed-model")).status, 401);
+  await page.locator("#keys-rows").getByRole("button", { name: "编辑", exact: true }).click();
+  await page.locator("#key-rpm").fill("");
+  await page.locator("#key-enabled").check();
+  await page.locator("#key-expiry").fill("");
+  await page.locator("#key-models").selectOption([]);
+  await page.locator("#key-save").click();
+  await page.locator("#key-editor").waitFor({ state: "hidden" });
+  assert.equal((await infer("other-model")).status, 200);
+  const current = (await (await context.request.get(base + "/admin/api/keys")).json()).keys[0];
+  assert.equal(current.rpm, undefined); assert.equal(current.expiresAt, undefined);
+  await context.request.put(base + "/admin/api/keys/" + id, { data: { version: current.version, name: "Updated elsewhere" } });
+  await page.locator("#keys-rows").getByRole("button", { name: "编辑", exact: true }).click();
+  await page.locator("#key-name").fill("Stale edit");
+  await page.locator("#key-save").click();
+  await page.locator("#keys-error").waitFor({ state: "visible" });
+  assert.match(await page.locator("#keys-rows").textContent(), /Updated elsewhere/);
+  await page.locator("#keys-rows").getByRole("button", { name: "轮换", exact: true }).click();
+  await page.locator("#key-confirm-submit").click();
+  await page.locator("#key-secret-dialog").waitFor({ state: "visible" });
+  const rotated = await page.locator("#key-secret").inputValue();
+  assert.notEqual(rotated, secret);
+  assert.equal((await infer("allowed-model")).status, 401);
+  assert.equal((await infer("allowed-model", rotated)).status, 200);
+  await page.locator("[data-close='key-secret-dialog']").last().click();
+  await page.locator("#keys-rows").getByRole("button", { name: "记录", exact: true }).click();
+  await page.waitForFunction(() => document.querySelectorAll("#request-record-rows tr").length >= 5);
+  assert.equal(await page.locator("#request-filter-key").inputValue(), id);
+  const audit = await (await context.request.get(base + "/admin/api/request-records?key=" + id)).json();
+  assert.ok(audit.records.every(record => record.apiKeyId === id && record.clientIP && record.requestId));
+  assert.ok(audit.records.some(record => record.authErrorCode === "rpm_exceeded"));
+  assert.equal(JSON.stringify(audit).includes(secret), false);
+  await page.locator("#keys-tab").click();
+  await page.waitForFunction(() => !document.querySelector("#keys-refresh").disabled);
+  mkdirSync("test-results", { recursive: true });
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.screenshot({ path: "test-results/keys-" + width + ".png", fullPage: true });
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    assert.equal(overflow, false, "page overflow at " + width);
+    assert.ok(await page.locator(width <= 900 ? "#keys-cards" : "#keys-table-wrap").isVisible());
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator("#keys-rows").getByRole("button", { name: "删除", exact: true }).click();
+  await page.locator("#key-confirm-submit").click();
+  await page.locator("#keys-empty").waitFor({ state: "visible" });
+  assert.equal((await infer("allowed-model", rotated)).status, 401);
+  await page.reload();
+  assert.equal(await page.locator("#key-secret").inputValue(), "");
+  assert.deepEqual(failures, []);
+  await context.close();
+});
+
+test("key expiry, IP, clipboard failure, logout and late secret response", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => { throw new Error("denied"); } } }));
+  const page = await context.newPage();
+  await page.route("**/admin/api/update**", route => route.fulfill({ contentType:"application/json",body:JSON.stringify({currentVersion:"test",sources:[]}) }));
+  await page.goto(base + "/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"});
+  const create = async data => { const response = await context.request.post(base+"/admin/api/keys",{data}); assert.equal(response.status(),201); return response.json(); };
+  const expired = await create({name:"Expired browser",expiresAt:"2000-01-01T00:00:00Z"});
+  const ip = await create({name:"IP browser",ipAllow:["192.0.2.5"]});
+  for (const [item,status] of [[expired,401],[ip,403]]) assert.equal((await context.request.get(base+"/v1/models",{headers:{Authorization:"Bearer "+item.secret}})).status(),status);
+  await page.locator("#keys-tab").click(); await page.locator("#keys-cards").getByText("Expired browser",{exact:true}).waitFor();
+  assert.ok((await page.locator("#keys-cards").textContent()).includes("已过期"));
+  await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Clipboard browser"); await page.locator("#key-save").click(); await page.locator("#key-secret-dialog").waitFor({state:"visible"});
+  await page.locator("#key-copy").click(); await page.locator("#key-copy-error").waitFor({state:"visible"});
+  await page.evaluate(() => document.querySelector("#logout-button").click()); await page.locator("#login-panel").waitFor({state:"visible"});
+  assert.equal(await page.locator("#key-secret").inputValue(),""); assert.equal(await page.locator("#key-secret-dialog").isVisible(),false);
+  await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"}); await page.locator("#keys-tab").click();
+  let release, intercepted;
+  const arrived = new Promise(resolve => { intercepted = resolve; }); const held = new Promise(resolve => { release = resolve; });
+  await page.route("**/admin/api/keys",async route => { if(route.request().method() !== "POST") return route.continue(); intercepted(); await held; await route.fulfill({status:201,contentType:"application/json",body:JSON.stringify({secret:"sk-delayed-secret",key:{id:"delayed"}})}); });
+  await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Delayed"); await page.locator("#key-save").click(); await arrived;
+  await page.evaluate(() => document.querySelector("#logout-button").click()); await page.locator("#login-panel").waitFor({state:"visible"}); release();
+  await page.waitForLoadState("networkidle"); assert.equal(await page.locator("#key-secret").inputValue(),""); assert.equal(await page.locator("#key-secret-dialog").isVisible(),false);
+  await context.request.post(base+"/admin/api/session",{data:{token:"test-admin-123"}});
+  const remaining = (await (await context.request.get(base+"/admin/api/keys")).json()).keys;
+  for (const item of remaining) await context.request.delete(base+"/admin/api/keys/"+item.id+"?version="+item.version);
+  await context.close();
+});
+
+test("verified metering quota, unknown reservation and reconciliation UI", async () => {
+  const context = await browser.newContext({viewport:{width:1440,height:1000}}); const page = await context.newPage();
+  await page.route("**/admin/api/update**",route=>route.fulfill({contentType:"application/json",body:JSON.stringify({currentVersion:"test",sources:[]})}));
+  await page.goto(base+"/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"});
+  const policies = await (await context.request.get(base+"/admin/api/model-policies")).json(); const rule = policies.models.find(item=>item.sourceId==="allowed-model");
+  const changed = await context.request.put(base+"/admin/api/model-policies/allowed-model",{data:{revision:policies.revision,rule:{...rule,metering:{source:"upstream-usage-v1",tokenUpperBound:80,creditUpperBound:10}}}}); assert.equal(changed.status(),200);
+  await page.locator("#keys-tab").click(); await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Meter browser"); await page.locator("#key-dailyTokens").fill("100"); await page.locator("#key-dailyCredits").fill("20"); await page.locator("#key-save").click(); await page.locator("#key-secret-dialog").waitFor({state:"visible"});
+  const secret = await page.locator("#key-secret").inputValue(); await page.locator("[data-close='key-secret-dialog']").last().click();
+  const infer = content=>context.request.post(base+"/v1/chat/completions",{headers:{Authorization:"Bearer "+secret},data:{model:"allowed-model",messages:[{role:"user",content}]}});
+  assert.equal((await infer("fixture:metered")).status(),200); assert.equal((await infer("unknown" )).status(),200); assert.equal((await infer("fixture:metered")).status(),429);
+  await page.locator("#settings-tab").click(); await page.getByRole("button",{name:"确认对账",exact:true}).waitFor();
+  const pending = page.locator(".metering-pending form").filter({has:page.getByRole("button",{name:"确认对账",exact:true})}).last();
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({width, height:844}); await pending.scrollIntoViewIfNeeded();
+    await page.screenshot({path:"test-results/metering-pending-"+width+".png"});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth), false);
+  }
+  await pending.locator("input").nth(0).fill("10"); await pending.locator("input").nth(1).fill("2"); await pending.getByRole("button",{name:"确认对账",exact:true}).click(); await page.getByRole("button",{name:"确认对账",exact:true}).waitFor({state:"hidden"});
+  const view = await (await context.request.get(base+"/admin/api/admission")).json(); assert.ok(Object.values(view.reservations).every(item=>item.state==="settled"));
+  await page.setViewportSize({width:1440,height:1000}); await page.locator("#keys-tab").click(); await page.locator("#keys-refresh").click();
+  await page.waitForFunction(()=>document.querySelector("#keys-rows").textContent.includes("Meter browser"));
+  const meterRow=page.locator("#keys-rows tr").filter({hasText:"Meter browser"});
+  await meterRow.getByRole("button",{name:"编辑",exact:true}).click();
+  for(const width of [1440,768,390,320]) {
+    await page.setViewportSize({width,height:844}); await page.locator("#key-dailyTokens").scrollIntoViewIfNeeded();
+    await page.screenshot({path:"test-results/metering-key-"+width+".png"});
+    assert.equal(await page.locator("#key-dailyTokens").inputValue(), "100");
+    await page.locator("#key-save").scrollIntoViewIfNeeded();
+    assert.equal(await page.locator("#key-save").isVisible(), true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  }
+  await page.locator("#key-editor [data-close]").first().click();
+  const key=(await(await context.request.get(base+"/admin/api/keys")).json()).keys.find(item=>item.name==="Meter browser"); await context.request.delete(base+"/admin/api/keys/"+key.id+"?version="+key.version);
+  const latest=await(await context.request.get(base+"/admin/api/model-policies")).json(); await context.request.delete(base+"/admin/api/model-policies/allowed-model",{data:{revision:latest.revision}});
+  await context.close();
+});
+
+test("model policies edit, alias filtering, disable and conflict", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await page.locator("#models-tab").click();
+  await page.locator("#model-rows").getByRole("button", { name: "编辑策略" }).first().waitFor();
+  const created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "model-policy-browser", models: ["allowed-model"] } })).json();
+  const row = page.locator("#model-rows tr").filter({ hasText: "allowed-model" });
+  await row.getByRole("button", { name: "编辑策略" }).click();
+  await page.locator("#model-policy-public").fill("public-model");
+  await page.locator("#model-policy-endpoints").selectOption("known");
+  await page.locator("input[name=model-endpoint][value='/v1/chat/completions']").check();
+  await page.locator("#model-policy-stream").selectOption("false");
+  await page.locator("#model-policy-save").click();
+  await page.locator("#model-policy-editor").waitFor({ state: "hidden" });
+  assert.match(await row.textContent(), /public-model/);
+  const headers = { Authorization: "Bearer " + created.secret };
+  const models = await (await context.request.get(base + "/v1/models", { headers })).json();
+  assert.deepEqual(models.data.map(item => item.id), ["public-model"]);
+  let response = await context.request.post(base + "/v1/chat/completions", { headers, data: { model: "public-model", stream: true } });
+  assert.equal(response.status(), 403);
+  response = await context.request.post(base + "/v1/chat/completions", { headers, data: { model: "public-model" } });
+  assert.equal(response.status(), 200);
+  await row.getByRole("button", { name: "编辑策略" }).click();
+  await page.locator("#model-policy-enabled").uncheck();
+  await page.locator("#model-policy-save").click();
+  await page.locator("#model-policy-editor").waitFor({ state: "hidden" });
+  assert.equal((await context.request.post(base + "/v1/chat/completions", { headers, data: { model: "public-model" } })).status(), 403);
+  assert.deepEqual((await (await context.request.get(base + "/v1/models", { headers })).json()).data, []);
+  await row.getByRole("button", { name: "编辑策略" }).click();
+  const snapshot = await (await context.request.get(base + "/admin/api/model-policies")).json();
+  const rule = snapshot.models.find(item => item.sourceId === "allowed-model");
+  await context.request.put(base + "/admin/api/model-policies/allowed-model", { data: { revision: snapshot.revision, rule: { ...rule, publicId: "changed-elsewhere" } } });
+  await page.locator("#model-policy-public").fill("stale-name");
+  await page.locator("#model-policy-save").click();
+  await page.waitForFunction(() => document.querySelector("#model-policy-error").textContent.includes("刷新"));
+  assert.match(await row.textContent(), /changed-elsewhere/);
+  await page.locator("[data-close=model-policy-editor]").click();
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.screenshot({ path: "test-results/models-" + width + ".png", fullPage: true });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "model overflow at " + width);
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await row.getByRole("button", { name: "编辑策略" }).click();
+  await page.locator("#model-policy-reset").click();
+  await page.locator("#model-policy-editor").waitFor({ state: "hidden" });
+  assert.equal((await context.request.post(base + "/v1/chat/completions", { headers, data: { model: "allowed-model" } })).status(), 200);
+  await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version);
+  const cooldownKey = await (await context.request.post(base + "/admin/api/keys", { data: { name: "cooldown-browser" } })).json();
+  const cooldownHeaders = { Authorization: "Bearer " + cooldownKey.secret };
+  const limited = await context.request.post(base + "/v1/chat/completions", { headers: cooldownHeaders, data: { model: "other-model", messages: [{ role: "user", content: "fixture:429" }] } });
+  assert.equal(limited.status(), 429);
+  const cooldowns = await (await context.request.get(base + "/admin/api/model-cooldowns")).json();
+  assert.ok(cooldowns.entries.some(item => item.accountId === "fixture" && item.model === "other-model" && item.reason === "upstream_429"));
+  assert.equal((await context.request.post(base + "/v1/chat/completions", { headers: cooldownHeaders, data: { model: "allowed-model" } })).status(), 200);
+  await page.locator("#accounts-tab").click();
+  await page.waitForFunction(() => document.querySelector("#account-rows").textContent.includes("other-model"));
+  assert.match(await page.locator("#account-rows").textContent(), /上游限流.*恢复/);
+  await context.request.delete(base + "/admin/api/keys/" + cooldownKey.key.id + "?version=" + cooldownKey.key.version);
+  assert.deepEqual(failures, []);
+  await context.close();
+});

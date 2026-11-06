@@ -1,0 +1,10 @@
+{
+  "name": "clodesen2api-web-tests",
+  "private": true,
+  "scripts": {
+    "test:web": "node --test --test-concurrency=1 tests/web/*.test.cjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

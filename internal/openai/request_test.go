@@ -10,9 +10,26 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+type timeoutReader struct{}
+
+func (timeoutReader) Read([]byte) (int, error) { return 0, os.ErrDeadlineExceeded }
+
+func TestReadBodyTimeoutReturns408ForJSONAndMultipart(t *testing.T) {
+	for _, contentType := range []string{"application/json", "multipart/form-data; boundary=test"} {
+		r := httptest.NewRequest("POST", EditsPath, timeoutReader{})
+		r.Header.Set("Content-Type", contentType)
+		_, err := BuildRequest(httptest.NewRecorder(), r)
+		failure, ok := AsRequestError(err)
+		if !ok || failure.Status != http.StatusRequestTimeout {
+			t.Fatalf("%s: %v", contentType, err)
+		}
+	}
+}
 
 func TestBuildGenerationRequestPreservesModelAndRebuildsPayload(t *testing.T) {
 	incoming := httptest.NewRequest(http.MethodPost, GenerationsPath+"?ignored=true", strings.NewReader(`{
@@ -110,8 +127,8 @@ func TestBuildChatCompletionRequestPreservesPayload(t *testing.T) {
 	if _, ok := request.Parameters["messages"]; ok {
 		t.Fatal("request parameters retained messages")
 	}
-	if _, ok := request.Parameters["tools"]; !ok {
-		t.Fatal("request parameters omitted tools")
+	if count, ok := request.Parameters["tool_count"]; !ok || count != 1 {
+		t.Fatal("request parameters omitted tool count")
 	}
 }
 

@@ -4,20 +4,24 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	_ "time/tzdata"
 
 	"clodesen2api/internal/updater"
 	"github.com/lfhy/flag"
 )
 
-// Config 由命令行 / 配置文件 / 环境变量统一注入。
-// lfhy/flag 会按 命令行 > 环境变量 > 配置文件 > 默认值 的优先级合并。
+// Config is immutable once passed to a running upstream session.
+// CLI and explicit CLODESEN2API_SECTION_KEY environment values override files.
 type Config struct {
-	path   string
-	Server struct {
+	path    string
+	sources map[string]string
+	Server  struct {
 		Addr string
 	}
 	Upstream struct {
@@ -41,6 +45,12 @@ type Config struct {
 		TokenFile    string
 		AccountsFile string
 	}
+	API struct {
+		Key            string
+		KeysFile       string
+		AllowNoAuth    bool
+		TrustedProxies string
+	}
 	Checkin struct {
 		Enable   bool
 		Path     string
@@ -60,7 +70,9 @@ type Config struct {
 
 // PublicSettings excludes credentials and tokens from the management API.
 type PublicSettings struct {
-	Server struct {
+	Revision int64                 `json:"revision,omitempty"`
+	Fields   map[string]FieldState `json:"fields,omitempty"`
+	Server   struct {
 		Addr string `json:"addr"`
 	} `json:"server"`
 	Upstream struct {
@@ -76,6 +88,11 @@ type PublicSettings struct {
 		RPM         int    `json:"rpm"`
 		AutoRelogin bool   `json:"autoRelogin"`
 	} `json:"auth"`
+	API struct {
+		KeysFile       string `json:"keysFile"`
+		AllowNoAuth    bool   `json:"allowNoAuth"`
+		TrustedProxies string `json:"trustedProxies"`
+	} `json:"api"`
 	Checkin struct {
 		Enable   bool   `json:"enable"`
 		Path     string `json:"path"`
@@ -122,6 +139,10 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Admin.Token, "admin-token", "admin", "token", "", "管理后台访问令牌（首次设置为 6-20 个字符）")
 	flag.StringConfigVar(&c.Admin.TokenFile, "admin-token-file", "admin", "token_file", "data/admin.token", "管理后台令牌持久化文件")
 	flag.StringConfigVar(&c.Admin.AccountsFile, "admin-accounts-file", "admin", "accounts_file", "data/accounts.json", "管理后台账号与策略存储文件")
+	flag.StringConfigVar(&c.API.Key, "api-key", "api", "key", "", "OpenAI 兼容接口外部 API key（只用于兼容/紧急管理）")
+	flag.StringConfigVar(&c.API.KeysFile, "api-keys-file", "api", "keys_file", "data/api-keys.json", "客户端 API key 存储文件")
+	flag.BoolConfigVar(&c.API.AllowNoAuth, "api-allow-no-auth", "api", "allow_no_auth", false, "无任何 key 时是否允许匿名调用（不建议）")
+	flag.StringConfigVar(&c.API.TrustedProxies, "api-trusted-proxies", "api", "trusted_proxies", "", "可信反向代理 IP/CIDR，逗号分隔")
 
 	flag.BoolConfigVar(&c.Checkin.Enable, "checkin", "checkin", "enable", true, "是否启用每日自动签到(GET)")
 	flag.StringConfigVar(&c.Checkin.Path, "checkin-path", "checkin", "path", "/api/checkin", "签到端点路径")
@@ -133,7 +154,15 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Update.Source, "update-source", "update", "source", "builtin:gh-proxy-com", "版本更新下载源")
 	flag.StringConfigVar(&c.Update.CustomPrefix, "update-custom-prefix", "update", "custom_prefix", "", "自定义 GitHub 加速前缀")
 
-	flag.Parse()
+	flag.StringVar(&c.path, "c", c.path, "配置文件路径")
+	if err := flag.Parse(); err != nil {
+		fmt.Fprintln(os.Stderr, "[config] 参数解析失败")
+		os.Exit(2)
+	}
+	if err := c.captureSources(flag.GetDefaultFlagSet(), os.Args[1:], os.LookupEnv); err != nil {
+		fmt.Fprintln(os.Stderr, "[config] 环境变量格式无效:", err)
+		os.Exit(2)
+	}
 	return c
 }
 
@@ -153,6 +182,12 @@ func (c *Config) PublicSettings() PublicSettings {
 	if out.Auth.RPM <= 0 {
 		out.Auth.RPM = 4
 	}
+	out.API.KeysFile = c.API.KeysFile
+	if out.API.KeysFile == "" {
+		out.API.KeysFile = "data/api-keys.json"
+	}
+	out.API.AllowNoAuth = c.API.AllowNoAuth
+	out.API.TrustedProxies = c.API.TrustedProxies
 	out.Checkin.Enable, out.Checkin.Path, out.Checkin.At, out.Checkin.Timezone = c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone
 	out.Redemption.Enable, out.Redemption.At = c.Redemption.Enable, c.Redemption.At
 	out.Redemption.Code = c.Redemption.Code
@@ -190,14 +225,54 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	if err != nil || requestTimeout < 0 {
 		return errors.New("请求超时必须是非负时长，例如 0s")
 	}
-	if strings.TrimSpace(settings.Upstream.BaseURL) == "" || strings.TrimSpace(settings.Upstream.OpenAIBaseURL) == "" {
-		return errors.New("上游地址不能为空")
+	if _, _, err := net.SplitHostPort(strings.TrimSpace(settings.Server.Addr)); err != nil {
+		return errors.New("监听地址必须包含有效端口")
+	}
+	for _, address := range []string{settings.Upstream.BaseURL, settings.Upstream.OpenAIBaseURL} {
+		u, err := url.Parse(strings.TrimSpace(address))
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("上游地址必须是有效的 HTTP/HTTPS 地址")
+		}
 	}
 	if strings.TrimSpace(settings.Upstream.LoginPath) == "" || strings.TrimSpace(settings.Checkin.Path) == "" {
 		return errors.New("接口路径不能为空")
 	}
+	for _, path := range []string{settings.Upstream.LoginPath, settings.Checkin.Path} {
+		if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+			return errors.New("上游路径必须以单个 / 开头")
+		}
+	}
+	apiSettings := settings.API
+	// Older panel clients do not send the API block. Preserve startup-only
+	// values in that case instead of turning a normal settings save into an
+	// invalid empty-path update.
+	if strings.TrimSpace(apiSettings.KeysFile) == "" {
+		apiSettings.KeysFile = c.API.KeysFile
+		apiSettings.AllowNoAuth = c.API.AllowNoAuth
+		apiSettings.TrustedProxies = c.API.TrustedProxies
+		if strings.TrimSpace(apiSettings.KeysFile) == "" {
+			apiSettings.KeysFile = "data/api-keys.json"
+		}
+	}
+	for _, network := range strings.Split(apiSettings.TrustedProxies, ",") {
+		network = strings.TrimSpace(network)
+		if network == "" {
+			continue
+		}
+		if net.ParseIP(network) == nil {
+			if _, _, err := net.ParseCIDR(network); err != nil {
+				return errors.New("可信代理必须是有效的 IP/CIDR")
+			}
+		}
+	}
 	if strings.TrimSpace(settings.Checkin.At) == "" || strings.TrimSpace(settings.Checkin.Timezone) == "" {
 		return errors.New("签到时间和时区不能为空")
+	}
+	if _, err := time.Parse("15:04", settings.Checkin.At); err != nil {
+		return errors.New("签到时间必须是 HH:MM")
+	}
+	if _, err := time.LoadLocation(settings.Checkin.Timezone); err != nil {
+		return errors.New("签到时区无效")
 	}
 	redemptionAt := strings.TrimSpace(settings.Redemption.At)
 	if redemptionAt == "" {
@@ -228,6 +303,7 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	c.Upstream.OpenAIBaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.OpenAIBaseURL), "/")
 	c.Upstream.LoginPath, c.Upstream.LoginTimeout, c.Upstream.RequestTimeout, c.Upstream.UserAgent = strings.TrimSpace(settings.Upstream.LoginPath), loginTimeout, requestTimeout, strings.TrimSpace(settings.Upstream.UserAgent)
 	c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin = strategy, rpm, settings.Auth.AutoRelogin
+	c.API.KeysFile, c.API.AllowNoAuth, c.API.TrustedProxies = strings.TrimSpace(apiSettings.KeysFile), apiSettings.AllowNoAuth, strings.TrimSpace(apiSettings.TrustedProxies)
 	c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone = settings.Checkin.Enable, strings.TrimSpace(settings.Checkin.Path), strings.TrimSpace(settings.Checkin.At), strings.TrimSpace(settings.Checkin.Timezone)
 	c.Redemption.Enable, c.Redemption.At = settings.Redemption.Enable, redemptionAt
 	if strings.TrimSpace(settings.Redemption.Code) != "" {
@@ -310,6 +386,12 @@ token = %q
 token_file = %q
 accounts_file = %q
 
+[api]
+key = %q
+keys_file = %q
+allow_no_auth = %t
+trusted_proxies = %q
+
 [checkin]
 enable = %t
 path = %q
@@ -327,7 +409,8 @@ custom_prefix = %q
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
 		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin,
-		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
+		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.API.Key, c.API.KeysFile, c.API.AllowNoAuth, c.API.TrustedProxies,
+		c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
 		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code,
 		c.Update.Source, c.Update.CustomPrefix)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
@@ -379,6 +462,11 @@ auto_relogin = true
 token = ""
 token_file = "data/admin.token"
 accounts_file = "data/accounts.json"
+[api]
+key = ""
+keys_file = "data/api-keys.json"
+allow_no_auth = false
+trusted_proxies = ""
 [checkin]
 enable = true
 path = "/api/checkin"

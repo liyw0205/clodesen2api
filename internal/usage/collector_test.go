@@ -118,3 +118,33 @@ func TestRequestRecordPromptIsTrimmedAndRuneSafe(t *testing.T) {
 		t.Fatal("prompt is not valid UTF-8 after truncation")
 	}
 }
+
+func TestKeySummaryIncludesRejectionsAndSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	collector, err := NewPersistent(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, record := range []RequestRecord{
+		{CreatedAt: now.Add(-25 * time.Hour), APIKeyID: "one", Success: true},
+		{CreatedAt: now.Add(-time.Hour), APIKeyID: "one", APIKeyName: "Client", ClientIP: "192.0.2.5", AuthResult: "authorized", RequestID: "req_1", Success: true, DurationMS: 100},
+		{CreatedAt: now, APIKeyID: "one", AuthResult: "rejected", AuthErrorCode: "rpm_exceeded", DurationMS: 0},
+		{CreatedAt: now, APIKeyID: "two", Success: true},
+	} {
+		collector.RecordRequest(record)
+	}
+	restored, err := NewPersistent(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := restored.KeySummaries(now.Add(-24 * time.Hour))["one"]
+	if item.Requests != 2 || item.Successes != 1 || item.Failures != 1 || item.AverageDurationMS != 50 || item.LastUsedAt == nil {
+		t.Fatalf("summary = %+v", item)
+	}
+	for _, record := range restored.RequestRecords() {
+		if record.RequestID == "req_1" && (record.ClientIP != "192.0.2.5" || record.APIKeyName != "Client") {
+			t.Fatalf("metadata lost: %+v", record)
+		}
+	}
+}

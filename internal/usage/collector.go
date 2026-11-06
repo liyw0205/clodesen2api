@@ -27,27 +27,93 @@ type Snapshot struct {
 	Failures         int64          `json:"failures"`
 	AverageLatencyMS int64          `json:"averageLatencyMs"`
 	Models           []ModelSummary `json:"models"`
+	Storage          StorageHealth  `json:"storage"`
 }
 
 // RequestRecord is one client model request. Parameters are a deliberately
 // sanitized summary; only image prompts are retained for panel inspection.
 type RequestRecord struct {
-	ID            int64          `json:"id"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	Model         string         `json:"model"`
-	DurationMS    int64          `json:"durationMs"`
-	FirstTokenMS  *int64         `json:"firstTokenMs,omitempty"`
-	ThinkingLevel string         `json:"thinkingLevel,omitempty"`
-	Prompt        string         `json:"prompt,omitempty"`
-	AccountID     string         `json:"accountId,omitempty"`
-	Account       string         `json:"account,omitempty"`
-	Endpoint      string         `json:"endpoint"`
-	Type          string         `json:"type"`
-	Status        int            `json:"status"`
-	StatusCategory string        `json:"statusCategory,omitempty"`
-	Success       bool           `json:"success"`
-	Error         string         `json:"error,omitempty"`
-	Parameters    map[string]any `json:"parameters,omitempty"`
+	ID             int64          `json:"id"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	Model          string         `json:"model"`
+	SourceModel    string         `json:"sourceModel,omitempty"`
+	UpstreamModel  string         `json:"upstreamModel,omitempty"`
+	PolicyRevision int64          `json:"policyRevision,omitempty"`
+	DurationMS     int64          `json:"durationMs"`
+	FirstTokenMS   *int64         `json:"firstTokenMs,omitempty"`
+	ThinkingLevel  string         `json:"thinkingLevel,omitempty"`
+	Prompt         string         `json:"prompt,omitempty"`
+	AccountID      string         `json:"accountId,omitempty"`
+	Account        string         `json:"account,omitempty"`
+	APIKeyID       string         `json:"apiKeyId,omitempty"`
+	APIKeyName     string         `json:"apiKeyName,omitempty"`
+	ClientIP       string         `json:"clientIP,omitempty"`
+	AuthResult     string         `json:"authResult,omitempty"`
+	AuthErrorCode  string         `json:"authErrorCode,omitempty"`
+	RequestID      string         `json:"requestId,omitempty"`
+	Stage          string         `json:"stage,omitempty"`
+	Owner          string         `json:"owner,omitempty"`
+	Endpoint       string         `json:"endpoint"`
+	Type           string         `json:"type"`
+	Status         int            `json:"status"`
+	StatusCategory string         `json:"statusCategory,omitempty"`
+	Success        bool           `json:"success"`
+	Error          string         `json:"error,omitempty"`
+	Parameters     map[string]any `json:"parameters,omitempty"`
+	Attempts       []Attempt      `json:"attempts,omitempty"`
+}
+
+type Attempt struct {
+	ID         string `json:"id"`
+	AccountID  string `json:"accountId,omitempty"`
+	Account    string `json:"account,omitempty"`
+	Model      string `json:"model"`
+	Status     int    `json:"status"`
+	DurationMS int64  `json:"durationMs"`
+	Wrote      bool   `json:"wrote"`
+	ErrorCode  string `json:"errorCode,omitempty"`
+}
+
+type KeySummary struct {
+	Requests          int64      `json:"requests"`
+	Successes         int64      `json:"successes"`
+	Failures          int64      `json:"failures"`
+	AverageDurationMS int64      `json:"averageDurationMs"`
+	LastUsedAt        *time.Time `json:"lastUsedAt,omitempty"`
+}
+
+// KeySummaries counts retained events in a fixed reporting interval.
+func (c *Collector) KeySummaries(since time.Time) map[string]KeySummary {
+	result := make(map[string]KeySummary)
+	if c == nil {
+		return result
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	totals := make(map[string]int64)
+	for _, record := range c.requests {
+		if record.Stage == "started" {
+			continue
+		}
+		if record.APIKeyID == "" || record.CreatedAt.Before(since) {
+			continue
+		}
+		item := result[record.APIKeyID]
+		item.Requests++
+		if record.Success {
+			item.Successes++
+		} else {
+			item.Failures++
+		}
+		if item.LastUsedAt == nil || record.CreatedAt.After(*item.LastUsedAt) {
+			stamp := record.CreatedAt
+			item.LastUsedAt = &stamp
+		}
+		totals[record.APIKeyID] += record.DurationMS
+		item.AverageDurationMS = totals[record.APIKeyID] / item.Requests
+		result[record.APIKeyID] = item
+	}
+	return result
 }
 
 type counter struct {
@@ -66,6 +132,8 @@ type Collector struct {
 	byModel     map[string]*counter
 	requests    []RequestRecord
 	persistPath string
+	writer      *asyncWriter
+	generation  uint64
 }
 
 const maxRequestRecords = 50000
@@ -111,6 +179,9 @@ func NewPersistent(path string) (*Collector, error) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		return collector, err
 	}
+	if saved.Version != 1 && saved.Version != 2 {
+		return collector, errors.New("unsupported usage file version")
+	}
 	if saved.StartedAt.IsZero() {
 		saved.StartedAt = collector.startedAt
 	}
@@ -141,6 +212,12 @@ func (c *Collector) RecordRequest(record RequestRecord) {
 	if record.ID == 0 {
 		record.ID = record.CreatedAt.UnixNano()
 	}
+	if record.Stage == "" {
+		record.Stage = "completed"
+	}
+	if c.writer != nil {
+		record.Owner = c.writer.owner
+	}
 	if record.DurationMS < 0 {
 		record.DurationMS = 0
 	}
@@ -157,8 +234,53 @@ func (c *Collector) RecordRequest(record RequestRecord) {
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
 	c.mu.Lock()
-	c.requests = append(c.requests, record)
+	c.generation++
+	replaced := false
+	wasFinished := false
+	if record.RequestID != "" {
+		for i := len(c.requests) - 1; i >= 0; i-- {
+			if c.requests[i].RequestID == record.RequestID {
+				wasFinished = c.requests[i].Stage != "started"
+				if wasFinished {
+					c.mu.Unlock()
+					return
+				}
+				c.requests[i] = record
+				replaced = true
+				break
+			}
+		}
+	}
+	if !replaced {
+		c.requests = append(c.requests, record)
+	}
 	c.requests = pruneRequests(c.requests, now)
+	if c.writer != nil {
+		if record.Stage != "started" && record.Endpoint != "/v1/models" {
+			model := record.Model
+			if model == "" {
+				model = "未指定"
+			}
+			item := c.byModel[model]
+			if item == nil {
+				item = &counter{}
+				c.byModel[model] = item
+			}
+			for _, current := range []*counter{&c.total, item} {
+				current.requests++
+				current.latency += time.Duration(record.DurationMS) * time.Millisecond
+				current.lastUsed = record.CreatedAt
+				if record.Success {
+					current.successes++
+				} else {
+					current.failures++
+				}
+			}
+		}
+		c.mu.Unlock()
+		c.writer.enqueue(record)
+		return
+	}
 	saved := c.persistedLocked()
 	c.mu.Unlock()
 	_ = persist(c.persistPath, saved)
@@ -206,6 +328,7 @@ func pruneRequests(records []RequestRecord, now time.Time) []RequestRecord {
 
 func cloneRequestRecord(record RequestRecord) RequestRecord {
 	record.Parameters = cloneParameters(record.Parameters)
+	record.Attempts = append([]Attempt(nil), record.Attempts...)
 	if record.FirstTokenMS != nil {
 		value := *record.FirstTokenMS
 		record.FirstTokenMS = &value
@@ -226,6 +349,9 @@ func cloneParameters(source map[string]any) map[string]any {
 
 func (c *Collector) Record(model string, status int, duration time.Duration, requestErr error) {
 	if c == nil {
+		return
+	}
+	if c.writer != nil {
 		return
 	}
 	model = strings.TrimSpace(model)
@@ -258,6 +384,10 @@ func (c *Collector) Record(model string, status int, duration time.Duration, req
 			current.failures++
 		}
 	}
+	if c.writer != nil {
+		c.mu.Unlock()
+		return
+	}
 	saved := c.persistedLocked()
 	c.mu.Unlock()
 	_ = persist(c.persistPath, saved)
@@ -271,6 +401,7 @@ func (c *Collector) Snapshot() Snapshot {
 	defer c.mu.RUnlock()
 
 	snapshot := Snapshot{
+		Storage:          c.StorageHealth(),
 		StartedAt:        c.startedAt,
 		TotalRequests:    c.total.requests,
 		Successes:        c.total.successes,

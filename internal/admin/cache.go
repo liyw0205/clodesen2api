@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -93,6 +94,12 @@ func (s *Service) persistCache() {
 		CreditUsageCachedAt: s.creditUsageCachedAt,
 	}
 	s.cacheMu.Unlock()
+	if s.control != nil {
+		if err := s.saveControlCache(saved); err != nil {
+			log.Printf("[storage] admin cache write failed")
+		}
+		return
+	}
 
 	s.cacheWriteMu.Lock()
 	defer s.cacheWriteMu.Unlock()

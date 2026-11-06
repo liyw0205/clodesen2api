@@ -2,6 +2,8 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const state = {
     accounts: [],
+    modelCooldowns: [],
+    sessionGeneration: 0,
     selected: new Set(),
     selectionReady: false,
     strategy: "fixed",
@@ -25,7 +27,7 @@
     requestRecordsLastRefreshAt: 0,
     requestRecordsPage: 1,
     requestRecordsPageSize: 20,
-    requestRecordFilters: { model: "", account: "", type: "", status: "" },
+    requestRecordFilters: { model: "", account: "", type: "", status: "", key: "" },
     updateSourceID: "",
     updateSourceOptions: [],
     updateSourceResults: {},
@@ -60,6 +62,8 @@
   }
 
   function setLogin(enabled, authenticated, setupRequired = false) {
+    if (!authenticated) { state.sessionGeneration++; state.settings = null; state.modelCooldowns = []; keyManagement.clear(); modelPolicies.clear(); admissionControl.clear(); jobManagement.clear(); storageManagement.clear(); clearCacheStatus(); $("#redemption-auto-code").value = ""; }
+    else void jobManagement.load();
     loginPanel.hidden = authenticated;
     dashboard.hidden = !authenticated;
     loginToken.disabled = !enabled;
@@ -188,6 +192,7 @@
   }
 
   async function saveUpdateSource(closeAfterSave = true) {
+    const epoch = state.sessionGeneration;
     const button = $("#update-source-save");
     const sourceRadios = Array.from($("#update-source-options").querySelectorAll("input[type=radio]"));
     button.disabled = true;
@@ -196,13 +201,17 @@
     try {
       const selection = updateSourceSelection();
       await api("/admin/api/update", { method: "PUT", body: JSON.stringify(selection) });
+      if (epoch !== state.sessionGeneration) return;
       state.updateSourceID = selection.source;
-      if (state.settings) state.settings.update = { source: selection.source, customPrefix: selection.customPrefix };
+      await loadSettings();
+      if (epoch !== state.sessionGeneration) return;
       if (closeAfterSave) $("#update-source-disclosure").open = false;
       showToast("更新加速源已保存");
     } catch (error) {
+      if (epoch !== state.sessionGeneration) return;
       $("#update-source-result").textContent = error.message;
     } finally {
+      if (epoch !== state.sessionGeneration) return;
       button.disabled = false;
       sourceRadios.forEach(radio => { radio.disabled = false; });
     }
@@ -288,7 +297,11 @@
       setLogin(true, false, false);
       throw new Error("登录状态已过期，请重新登录");
     }
-    if (!response.ok) throw new Error(payload && payload.error ? payload.error : "请求失败");
+    if (!response.ok) {
+      const error = new Error(typeof payload?.error === "string" ? payload.error : payload?.error?.message || "请求失败");
+      error.status = response.status;
+      throw error;
+    }
     return payload;
   }
 
@@ -432,13 +445,16 @@
   }
 
   function selectView(view) {
+    void loadCacheStatus();
     const analytics = view === "analytics";
     const records = view === "records";
     const settings = view === "settings";
-    $("#accounts-view").hidden = analytics || records || settings;
+    const keys = view === "keys";
+    $("#accounts-view").hidden = analytics || records || settings || keys;
     $("#analytics-view").hidden = !analytics;
     $("#records-view").hidden = !records;
     $("#settings-view").hidden = !settings;
+    $("#keys-view").hidden = !keys;
     document.querySelectorAll("[data-view]").forEach(button => {
       const selected = button.dataset.view === view;
       button.setAttribute("aria-selected", String(selected));
@@ -446,8 +462,28 @@
     });
     if (analytics) void loadAnalytics(false, true);
     else if (records) void loadRequestRecords(false);
-    else if (settings) void loadSettings();
+    else if (settings) { void loadSettings(); void admissionControl.load(); void storageManagement.load(); }
+    else if (keys) void keyManagement.load();
     else void refresh(false, false, true);
+  }
+
+  let cacheStatusTimer = null;
+  const cacheNotices = new Map();
+  function clearCacheStatus() { window.clearTimeout(cacheStatusTimer); cacheStatusTimer = null; for (const notice of cacheNotices.values()) notice.remove(); cacheNotices.clear(); }
+  async function loadCacheStatus() {
+    const epoch = state.sessionGeneration;
+    window.clearTimeout(cacheStatusTimer); cacheStatusTimer = null;
+    try {
+      const result = await api("/admin/api/cache-status"); if (epoch !== state.sessionGeneration) return;
+      const states = { empty: "暂无缓存", hit: "缓存有效", stale: "缓存已过期", "stale-on-error": "刷新失败，显示历史数据", partial: "部分账号刷新失败" };
+      for (const [key, selector] of [["accounts", "#accounts-view .section-heading"], ["models", "[aria-labelledby='models-title'] .section-heading"], ["credits", "[aria-labelledby='credit-usage-title'] .section-heading"]]) {
+        const status = result[key]; if (!status) continue;
+        let notice = cacheNotices.get(key);
+        if (!notice) { notice = element("p", "field-note cache-notice"); notice.dataset.resource = key; const heading = document.querySelector(selector); if (!heading) continue; heading.after(notice); cacheNotices.set(key, notice); }
+        notice.textContent = (key === "credits" ? "积分记录：" : key === "models" ? "模型：" : "账号：") + (states[status.cacheState] || status.cacheState) + (status.refreshing ? " · 正在刷新" : "") + (status.cachedAt && !status.cachedAt.startsWith("0001") ? " · " + formatTime(status.cachedAt) : "") + (status.partialFailures?.length ? " · 失败 " + status.partialFailures.length + " 个账号" : "");
+      }
+      if (Object.values(result).some(item => item.refreshing)) cacheStatusTimer = window.setTimeout(loadCacheStatus, 2000);
+    } catch (_) { /* Resource requests retain their own actionable errors. */ }
   }
 
   function setSettingsForm(settings) {
@@ -471,6 +507,26 @@
     if (state.updateSourceOptions.length) renderUpdateSourceOptions(state.updateSourceOptions, state.updateSourceID);
     else $("#update-custom-wrap").hidden = state.updateSourceID !== "custom";
     setRedemptionSettingsForm(settings);
+    renderSettingsSources(settings);
+  }
+
+  function renderSettingsSources(settings) {
+    const controls = {
+      "server.addr": "settings-server-addr", "upstream.baseURL": "settings-base-url", "upstream.openAIBaseURL": "settings-openai-url",
+      "upstream.loginPath": "settings-login-path", "upstream.loginTimeout": "settings-login-timeout", "upstream.requestTimeout": "settings-request-timeout", "upstream.userAgent": "settings-user-agent",
+      "auth.strategy": "settings-strategy", "auth.rpm": "settings-account-rpm", "auth.autoRelogin": "settings-auto-relogin",
+      "checkin.enable": "settings-checkin-enable", "checkin.path": "settings-checkin-path", "checkin.at": "settings-checkin-at", "checkin.timezone": "settings-checkin-timezone",
+      "redemption.enable": "redemption-auto-enable", "redemption.at": "redemption-auto-at", "redemption.code": "redemption-auto-code",
+    };
+    const sources = { cli: "命令行", environment: "环境变量", management: "管理设置", file: "配置文件", default: "默认值" };
+    for (const [path, id] of Object.entries(controls)) {
+      const input = document.getElementById(id); const field = settings.fields?.[path];
+      if (!input) continue;
+      input.disabled = Boolean(field?.locked);
+      const parent = input.closest("label"); if (!parent) continue;
+      parent.querySelector(".setting-source")?.remove();
+      if (field) parent.append(element("span", "field-note setting-source", sources[field.source] + (field.locked ? " · 已锁定" : field.pending ? " · 待重启" : field.mode === "restart" ? " · 重启生效" : " · 即时生效")));
+    }
   }
 
   function setRedemptionSettingsForm(settings) {
@@ -483,8 +539,9 @@
   }
 
   async function loadSettings() {
-    try { setSettingsForm(await api("/admin/api/config")); $("#settings-error").textContent = ""; }
-    catch (error) { $("#settings-error").textContent = error.message; }
+    const epoch = state.sessionGeneration;
+    try { const settings = await api("/admin/api/config"); if (epoch !== state.sessionGeneration) return; setSettingsForm(settings); $("#settings-error").textContent = ""; }
+    catch (error) { if (epoch === state.sessionGeneration) $("#settings-error").textContent = error.message; }
   }
 
   async function saveSettings(event) {
@@ -492,7 +549,8 @@
     const button = $("#settings-save");
     button.disabled = true;
     $("#settings-error").textContent = "";
-    const payload = { server: { addr: $("#settings-server-addr").value.trim() }, upstream: {
+    const epoch = state.sessionGeneration;
+    const payload = { ...state.settings, server: { addr: $("#settings-server-addr").value.trim() }, upstream: {
       baseURL: $("#settings-base-url").value.trim(), openAIBaseURL: $("#settings-openai-url").value.trim(),
       loginPath: $("#settings-login-path").value.trim(), loginTimeout: $("#settings-login-timeout").value.trim(),
       requestTimeout: $("#settings-request-timeout").value.trim(), userAgent: $("#settings-user-agent").value.trim(),
@@ -503,21 +561,25 @@
       enable: Boolean(state.settings?.redemption?.enable), at: state.settings?.redemption?.at || "04:30",
       code: state.settings?.redemption?.code || "",
     }};
-    try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
-    catch (error) { $("#settings-error").textContent = error.message; }
-    finally { button.disabled = false; }
+    try { const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) }); if (epoch !== state.sessionGeneration) return; setSettingsForm(result.settings); showToast(result.restartRequired ? "设置已保存，部分设置需重启生效" : "设置已保存"); }
+    catch (error) { if (epoch === state.sessionGeneration) { if (error.status === 409) await loadSettings(); $("#settings-error").textContent = error.message; } }
+    finally { if (epoch === state.sessionGeneration) button.disabled = false; }
   }
 
   async function loadRedemptionSettings() {
+    const epoch = state.sessionGeneration;
     try {
       const settings = await api("/admin/api/config");
+      if (epoch !== state.sessionGeneration) return;
       setRedemptionSettingsForm(settings);
+      renderSettingsSources(settings);
     } catch (error) {
-      if (error.message !== "登录状态已过期，请重新登录") $("#redemption-auto-error").textContent = error.message;
+      if (epoch === state.sessionGeneration && error.message !== "登录状态已过期，请重新登录") $("#redemption-auto-error").textContent = error.message;
     }
   }
 
   async function saveRedemptionSettings() {
+    const epoch = state.sessionGeneration;
     const button = $("#redemption-settings-save");
     button.disabled = true;
     $("#redemption-auto-error").textContent = "";
@@ -530,12 +592,14 @@
         code: $("#redemption-auto-code").value.trim(),
       };
       const result = await api("/admin/api/config", { method: "PUT", body: JSON.stringify(payload) });
+      if (epoch !== state.sessionGeneration) return;
       setRedemptionSettingsForm(result.settings);
+      renderSettingsSources(result.settings);
       showToast(result.restartRequired ? "自动兑换设置已保存，重启后完整生效" : "自动兑换设置已保存");
     } catch (error) {
-      $("#redemption-auto-error").textContent = error.message;
+      if (epoch === state.sessionGeneration) $("#redemption-auto-error").textContent = error.message;
     } finally {
-      button.disabled = false;
+      if (epoch === state.sessionGeneration) button.disabled = false;
     }
   }
 
@@ -556,21 +620,28 @@
       const credits = modelCredits(model);
       const parameter = modelPricingParameter(model);
       const row = element("tr");
-      row.append(element("td", "model-id", id));
+      const identity = element("td", "model-id");
+      const policy = modelPolicies.rule(id);
+      identity.append(element("strong", "", policy?.publicId || id));
+      if (policy && (policy.publicId !== id || policy.upstreamId !== id)) identity.append(element("div", "field-note", id + " → " + policy.upstreamId));
+      row.append(identity);
       if (pricedModels) {
         const creditCell = element("td", "model-credits");
         if (credits) creditCell.append(element("span", "model-credit-value", credits));
         if (parameter) creditCell.append(element("span", "model-credit-parameter", parameter));
         row.append(creditCell);
       }
+      const actions = element("td"); actions.append(modelPolicies.controls(id)); row.append(actions);
       rows.append(row);
 
       const card = element("article", "model-card");
-      card.append(element("strong", "model-card-id", id));
+      card.append(element("strong", "model-card-id", policy?.publicId || id));
+      if (policy && (policy.publicId !== id || policy.upstreamId !== id)) card.append(element("div", "field-note", id + " → " + policy.upstreamId));
       const details = element("div", "model-card-details");
       if (credits) details.append(element("span", "model-credits", credits));
       if (parameter) details.append(element("span", "model-credit-parameter", parameter));
       card.append(details);
+      card.append(modelPolicies.controls(id));
       cards.append(card);
     }
   }
@@ -666,6 +737,8 @@
   }
 
   function requestRecordStatus(record) {
+	if (record.stage === "started") return "进行中";
+	if (record.stage === "interrupted") return "已中断";
     const category = record.statusCategory || (record.success ? "normal" : "abnormal");
     if (category === "normal") return "正常";
     if (category === "upstream_error") return "报错" + (record.status ? " · " + record.status : "");
@@ -700,10 +773,27 @@
     return button;
   }
 
+  function attemptDetails(record) {
+    if (!Array.isArray(record.attempts) || !record.attempts.length) return null;
+    const details = element("details", "request-attempts");
+    details.append(element("summary", "", record.attempts.length + " 次上游尝试"));
+    const list = element("ol");
+    for (const attempt of record.attempts) list.append(element("li", "", [attempt.id, attempt.account || attempt.accountId, attempt.model, attempt.status || "未响应", formatDuration(attempt.durationMs), attempt.errorCode].filter(Boolean).join(" · ")));
+    details.append(list);
+    return details;
+  }
+
   function renderRequestRecords() {
     const result = state.requestRecords;
     const records = result && Array.isArray(result.records) ? result.records : [];
     const summary = result?.summary || {};
+    let storageNotice = $("#audit-storage-health");
+    if (!storageNotice) {
+      storageNotice = element("p", "inline-error"); storageNotice.id = "audit-storage-health";
+      storageNotice.setAttribute("role", "status"); $("#request-record-filters").after(storageNotice);
+    }
+    storageNotice.hidden = !result?.storage?.degraded;
+    storageNotice.textContent = result?.storage?.degraded ? "审计存储异常 · 失败 " + formatNumber(result.storage.failures) + " 次 · 丢弃 " + formatNumber(result.storage.dropped) + " 条 · 最近失败 " + formatTime(result.storage.lastFailure) : "";
     $("#request-record-total").textContent = formatNumber(summary.total ?? result?.total);
     $("#request-record-successes").textContent = formatNumber(summary.successes);
     $("#request-record-failures").textContent = formatNumber(summary.failures);
@@ -741,6 +831,11 @@
       if (record.type !== "image") thinkingCell.textContent = record.thinkingLevel || "未指定";
       const statusCell = element("td", "");
       statusCell.append(requestStatusNode(record));
+      const client = element("td", "request-record-client");
+      client.append(element("strong", "", record.apiKeyName || record.apiKeyId || "--"), element("small", "muted", record.clientIP || "--"));
+      client.title = [record.requestId, record.authErrorCode].filter(Boolean).join(" · ");
+      const attempts = attemptDetails(record);
+      if (attempts) client.append(attempts);
       row.append(element("td", "request-record-time", formatTime(record.createdAt)),
         element("td", "model-id request-record-model", record.model || "未指定"),
         element("td", "request-record-type " + (record.type || ""), requestTypeLabel(record.type)),
@@ -750,7 +845,7 @@
         firstCell,
         thinkingCell,
         statusCell,
-        element("td", "request-record-parameters", params));
+        element("td", "request-record-parameters", params), client);
       rows.append(row);
 
       const card = element("article", "request-record-card");
@@ -760,13 +855,15 @@
       const fields = [["时间", formatTime(record.createdAt)], ["类型", requestTypeLabel(record.type)], ["端点", record.endpoint || "--"], ["账号", record.account || record.accountId || "--"], ["耗时", formatDuration(record.durationMs)]];
       if (record.type === "image") fields.push(["提示词", promptAction(record)]);
       else fields.push(["首字", record.firstTokenMs == null ? "--" : formatDuration(record.firstTokenMs)], ["思考", record.thinkingLevel || "未指定"]);
-      fields.push(["参数", params]);
+      fields.push(["密钥", record.apiKeyName || record.apiKeyId || "--"], ["客户端 IP", record.clientIP || "--"], ["认证", record.authErrorCode || record.authResult || "--"], ["请求 ID", record.requestId || "--"], ["参数", params]);
       for (const [label, value] of fields) {
         const item = element("div", "request-record-card-field");
         item.append(element("span", "field-label", label), value instanceof Node ? value : element("strong", "", value));
         details.append(item);
       }
       card.append(top, details);
+      const cardAttempts = attemptDetails(record);
+      if (cardAttempts) card.append(cardAttempts);
       cards.append(card);
     }
   }
@@ -853,6 +950,7 @@
   }
 
   async function loadAnalytics(force = false, silent = false) {
+    const generation = state.sessionGeneration;
     const existing = state.analyticsRefreshPromise;
     if (existing) {
       if (!force) return existing;
@@ -875,6 +973,7 @@
           api("/admin/api/usage"),
           api(creditUsagePath(force)),
         ]);
+        if (generation !== state.sessionGeneration) return;
         const modelResult = results[0];
         const usageResult = results[1];
         const creditUsageResult = results[2];
@@ -887,6 +986,8 @@
         state.usage = nextUsage;
         state.creditUsage = nextCreditUsage;
         state.analyticsLoaded = true;
+        await modelPolicies.load();
+        if (generation !== state.sessionGeneration) return;
         $("#model-error").hidden = true;
         $("#credit-usage-error").hidden = true;
         renderModels();
@@ -1009,6 +1110,13 @@
     return button;
   }
 
+  function appendModelCooldowns(container, account) {
+    for (const row of state.modelCooldowns) {
+      if (row.accountId !== account.id || new Date(row.until).getTime() <= Date.now()) continue;
+      container.append(element("span", "field-note", row.model + " · 上游限流 · 恢复 " + formatTime(row.until)));
+    }
+  }
+
   function renderTable() {
     const body = $("#account-rows");
     body.replaceChildren();
@@ -1020,6 +1128,7 @@
       const identity = element("div", "account-identity");
       identity.append(element("strong", "", account.identifier));
       identity.append(element("span", "", accountDetail(account)));
+      appendModelCooldowns(identity, account);
       identityCell.append(identity);
       const balanceCell = element("td", "balance-cell");
       balanceCell.append(element("strong", "", formatNumber(account.balance)));
@@ -1053,6 +1162,7 @@
       const info = element("div", "account-card-info");
       info.append(element("strong", "", account.identifier));
       info.append(element("span", "", accountDetail(account)));
+      appendModelCooldowns(info, account);
       top.append(info);
       top.append(statusWithRPM(account));
       const data = element("div", "account-card-data");
@@ -1091,6 +1201,7 @@
   }
 
   async function refresh(showLoading = true, force = false, silent = false) {
+    const generation = state.sessionGeneration;
     const existing = state.accountsRefreshPromise;
     if (existing) {
       if (!force) return existing;
@@ -1111,7 +1222,16 @@
       }
       if (!silent) $("#error-state").hidden = true;
       try {
-        const result = await api("/admin/api/accounts" + (force ? "?refresh=1" : ""));
+        const [result, cooldowns] = await Promise.all([
+          api("/admin/api/accounts" + (force ? "?refresh=1" : "")),
+          api("/admin/api/model-cooldowns").catch(() => ({ degraded: true, entries: [] })),
+        ]);
+        if (generation !== state.sessionGeneration) return;
+        state.modelCooldowns = Array.isArray(cooldowns.entries) ? cooldowns.entries : [];
+        let health = $("#model-cooldown-health");
+        if (!health) { health = element("p", "inline-error"); health.id = "model-cooldown-health"; health.setAttribute("role", "status"); $("#account-table-wrap").before(health); }
+        health.hidden = !cooldowns.degraded;
+        health.textContent = cooldowns.degraded ? "模型冷却存储异常，当前使用本机保护状态" : "";
         const nextAccounts = Array.isArray(result.accounts) ? result.accounts : [];
         state.accounts = nextAccounts;
         state.strategy = result.strategy || "fixed";
@@ -1254,10 +1374,7 @@
     if (button) button.disabled = true;
     if (!account) $("#checkin-all-button").disabled = true;
     try {
-      const path = account ? "/admin/api/accounts/" + encodeURIComponent(account.id) + "/checkin" : "/admin/api/checkin";
-      const result = await api(path, { method: "POST" });
-      showToast(result.message || (account ? "账号签到完成" : "全部账号签到完成"));
-      await refresh(false, true);
+      await jobManagement.submit("checkin", account ? [account.id] : []);
     } catch (error) {
       showToast(error.message);
     } finally {
@@ -1269,14 +1386,7 @@
   async function refreshAccountStatus(account, button = null) {
     if (button) button.disabled = true;
     try {
-      const result = await api("/admin/api/accounts/" + encodeURIComponent(account.id) + "/refresh", { method: "POST" });
-      if (result.account) {
-        const index = state.accounts.findIndex(item => item.id === account.id);
-        if (index >= 0) state.accounts[index] = result.account;
-        render();
-      }
-      showToast(result.ok ? "账号状态已刷新" : (result.account && result.account.error) || "账号状态刷新失败");
-      await refresh(false, true, true);
+      await jobManagement.submit("refresh", [account.id]);
     } catch (error) {
       showToast(error.message);
     } finally {
@@ -1323,14 +1433,8 @@
     submit.textContent = "正在逐账号兑换";
     $("#redeem-form-error").textContent = "";
     try {
-      const result = await api("/admin/api/redeem", {
-        method: "POST",
-        body: JSON.stringify({ code, accountIds: ids }),
-      });
+      await jobManagement.submit("redeem", ids, code);
       redeemDialog.close();
-      showResults(result);
-      await loadRedemptionHistory();
-      await refresh(false, true);
     } catch (error) {
       $("#redeem-form-error").textContent = error.message;
     } finally {
@@ -1424,6 +1528,7 @@
       account: $("#request-filter-account").value.trim(),
       type: $("#request-filter-type").value,
       status: $("#request-filter-status").value,
+      key: $("#request-filter-key").value.trim(),
     };
     void loadRequestRecords(false);
   });
@@ -1532,5 +1637,16 @@
     }
   }).catch(() => {});
 
+  const modelPolicies = window.createModelPolicies({ api, element, showToast, render: renderModels });
+  const admissionControl = window.createAdmission({ api, element });
+  const storageManagement = window.createStorage({ api, element, formatTime });
+  const jobManagement = window.createJobs({ api, element, formatTime, showToast, onComplete: () => { void refresh(false, true); void loadRedemptionHistory(); } });
+  const keyManagement = window.createKeyManagement({ api, element, formatTime, formatNumber, showToast, openRecords: id => {
+    state.requestRecordFilters = { model: "", account: "", type: "", status: "", key: id };
+    state.requestRecordsPage = 1;
+    for (const field of ["model", "account", "type", "status"]) $("#request-filter-" + field).value = "";
+    $("#request-filter-key").value = id;
+    selectView("records");
+  } });
   boot();
 })();

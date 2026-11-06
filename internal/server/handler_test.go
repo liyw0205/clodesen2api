@@ -179,8 +179,8 @@ func TestNewHandlerForwardsOnlyRebuiltAllowedPaths(t *testing.T) {
 		t.Fatalf("usage by model = %+v", usageSnapshot.Models)
 	}
 	requestRecords := stats.RequestRecords()
-	if len(requestRecords) != 3 {
-		t.Fatalf("request records = %d, want 3", len(requestRecords))
+	if len(requestRecords) != 4 {
+		t.Fatalf("request records = %d, want 4 including catalog audit", len(requestRecords))
 	}
 	types := make(map[string]bool)
 	for _, record := range requestRecords {

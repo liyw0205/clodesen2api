@@ -2,8 +2,16 @@
 
 package updater
 
-import "errors"
+import "os"
 
 func Restart() error {
-	return errors.New("automatic restart is not supported on Windows")
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	process, err := os.StartProcess(executable, os.Args, &os.ProcAttr{Env: os.Environ(), Files: []*os.File{os.Stdin, os.Stdout, os.Stderr}})
+	if err != nil {
+		return err
+	}
+	return process.Release()
 }

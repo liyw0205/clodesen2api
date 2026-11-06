@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,6 +40,26 @@ func (s *Service) recordLocalCredit(record upstream.CreditUsageRecord) {
 	if strings.TrimSpace(record.CreatedAt) == "" {
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	if s.control != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		if err := s.control.Mutate(ctx, "credit-ledger", func(raw json.RawMessage) (any, error) {
+			var value localCreditUsageFile
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return nil, err
+			}
+			for _, old := range value.Records {
+				if old.ID == record.ID {
+					return value, nil
+				}
+			}
+			value.Records = pruneCreditRecords(append(value.Records, record), time.Now())
+			return value, nil
+		}); err != nil {
+			log.Printf("[storage] credit ledger write failed")
+		}
+		return
+	}
 	s.localCreditMu.Lock()
 	s.localCreditUsage = append(pruneCreditRecords(s.localCreditUsage, time.Now()), record)
 	s.localCreditUsage = pruneCreditRecords(s.localCreditUsage, time.Now())
@@ -47,6 +69,16 @@ func (s *Service) recordLocalCredit(record upstream.CreditUsageRecord) {
 }
 
 func (s *Service) localCreditRecords() []upstream.CreditUsageRecord {
+	if s.control != nil {
+		var saved localCreditUsageFile
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		if _, err := s.control.Load(ctx, "credit-ledger", &saved); err == nil {
+			return pruneCreditRecords(saved.Records, time.Now())
+		}
+		log.Printf("[storage] credit ledger read failed")
+		return nil
+	}
 	s.localCreditMu.Lock()
 	defer s.localCreditMu.Unlock()
 	s.localCreditUsage = pruneCreditRecords(s.localCreditUsage, time.Now())

@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -14,7 +16,14 @@ import (
 	"sync"
 	"time"
 
+	"clodesen2api/internal/admission"
+	"clodesen2api/internal/apikey"
+	"clodesen2api/internal/backups"
 	"clodesen2api/internal/config"
+	"clodesen2api/internal/controlstore"
+	"clodesen2api/internal/jobs"
+	"clodesen2api/internal/modelcooldown"
+	"clodesen2api/internal/modelpolicy"
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
 )
@@ -51,10 +60,111 @@ type Service struct {
 	redemptionHistory   []RedemptionHistoryRecord
 	redemptionPath      string
 	cfg                 *config.Config
+	settings            *config.SettingsStore
 	configMu            sync.Mutex
 	appVersion          string
 	goarm               string
 	restartProcess      func() error
+	keyStore            *apikey.Store
+	control             *controlstore.Store
+	modelPolicies       *modelpolicy.Store
+	modelCooldowns      *modelcooldown.Store
+	admission           *admission.Store
+	jobs                *jobs.Store
+	refreshes           refreshGroup
+	accountSyncMu       sync.Mutex
+	accountRevision     int64
+	backups             *backups.Service
+	requestRestore      func() bool
+	draining            bool
+}
+
+func (s *Service) SetAdmission(store *admission.Store) {
+	s.mu.Lock()
+	s.admission = store
+	s.mu.Unlock()
+}
+
+func (s *Service) SetRestoreRequest(request func() bool) {
+	s.mu.Lock()
+	s.requestRestore = request
+	s.mu.Unlock()
+}
+func (s *Service) Draining() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.draining }
+
+func (s *Service) SetModelCooldowns(store *modelcooldown.Store) {
+	s.mu.Lock()
+	s.modelCooldowns = store
+	s.mu.Unlock()
+}
+
+func (s *Service) SetModelPolicies(store *modelpolicy.Store) {
+	s.mu.Lock()
+	s.modelPolicies = store
+	s.mu.Unlock()
+}
+
+func (s *Service) currentModelPolicies() *modelpolicy.Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.modelPolicies
+}
+
+func (s *Service) SetControlStore(store *controlstore.Store) {
+	s.mu.Lock()
+	s.control = store
+	s.mu.Unlock()
+}
+
+type savedSession struct {
+	Expires   time.Time `json:"expires"`
+	TokenHash string    `json:"tokenHash"`
+}
+
+func sessionHash(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *Service) changeSession(session string, expires *time.Time) error {
+	s.mu.Lock()
+	store := s.control
+	s.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	tokenHash := sessionHash(s.currentToken())
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	return store.Mutate(ctx, "sessions", func(raw json.RawMessage) (any, error) {
+		sessions := make(map[string]savedSession)
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &sessions); err != nil {
+				return nil, err
+			}
+		}
+		for id, item := range sessions {
+			if !item.Expires.After(time.Now()) || item.TokenHash != tokenHash {
+				delete(sessions, id)
+			}
+		}
+		id := sessionHash(session)
+		if expires == nil {
+			delete(sessions, id)
+		} else {
+			if len(sessions) >= 128 {
+				return nil, errors.New("session limit reached")
+			}
+			sessions[id] = savedSession{Expires: *expires, TokenHash: tokenHash}
+		}
+		return sessions, nil
+	})
+}
+
+func (s *Service) SetKeyStore(store *apikey.Store) {
+	s.mu.Lock()
+	s.keyStore = store
+	s.mu.Unlock()
 }
 
 func (s *Service) SetUpdater(version, goarm string, restart func() error) {
@@ -126,6 +236,18 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "请先登录管理后台")
 		return
 	}
+	if s.Draining() && isMutation(r.Method) {
+		writeError(w, 503, "恢复准备中，暂停接受新操作")
+		return
+	}
+	if err := s.SyncSettings(r.Context()); err != nil {
+		writeError(w, 503, "配置存储不可用")
+		return
+	}
+	if err := s.SyncAccounts(r.Context()); err != nil {
+		writeError(w, 503, "账号存储不可用")
+		return
+	}
 	if isMutation(r.Method) && !sameOrigin(r) {
 		writeError(w, http.StatusForbidden, "跨站请求已拒绝")
 		return
@@ -134,6 +256,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleSession(w http.ResponseWriter, r *http.Request) {
+	if isMutation(r.Method) && !sameOrigin(r) {
+		writeError(w, http.StatusForbidden, "跨站请求已拒绝")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -186,6 +312,10 @@ func (s *Service) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.createSession(w, r)
 	case http.MethodDelete:
 		if cookie, err := r.Cookie(sessionCookie); err == nil {
+			if err := s.changeSession(cookie.Value, nil); err != nil {
+				writeError(w, 503, "退出登录失败，请重试")
+				return
+			}
 			s.mu.Lock()
 			delete(s.sessions, cookie.Value)
 			s.mu.Unlock()
@@ -205,8 +335,14 @@ func (s *Service) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, expires := hex.EncodeToString(raw), time.Now().Add(12*time.Hour)
+	if err := s.changeSession(session, &expires); err != nil {
+		writeError(w, 503, "无法保存登录会话")
+		return
+	}
 	s.mu.Lock()
-	s.sessions[session] = expires
+	if s.control == nil {
+		s.sessions[session] = expires
+	}
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: session, Path: "/admin", HttpOnly: true,
@@ -226,6 +362,17 @@ func (s *Service) authenticated(r *http.Request) bool {
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil || cookie.Value == "" {
 		return false
+	}
+	s.mu.Lock()
+	store := s.control
+	s.mu.Unlock()
+	if store != nil {
+		var sessions map[string]savedSession
+		if _, err := store.Load(r.Context(), "sessions", &sessions); err != nil {
+			return false
+		}
+		item, ok := sessions[sessionHash(cookie.Value)]
+		return ok && item.Expires.After(time.Now()) && item.TokenHash == sessionHash(s.currentToken())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

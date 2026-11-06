@@ -107,11 +107,16 @@ func (u *Upstream) ListPricing(ctx context.Context) (defaultCredits *int64, mode
 // ListCreditUsage returns recent credit transactions from every account.
 // Account failures are tolerated when at least one account responds.
 func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, error) {
+	records, _, err := u.ListCreditUsageWithFailures(ctx)
+	return records, err
+}
+
+func (u *Upstream) ListCreditUsageWithFailures(ctx context.Context) ([]CreditUsageRecord, []string, error) {
 	accounts := u.accountsSnapshot()
 	direct := len(accounts) == 0
 	if direct {
 		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
-			return nil, errors.New("no upstream account configured")
+			return nil, nil, errors.New("no upstream account configured")
 		}
 		accounts = []*Upstream{u}
 	}
@@ -120,6 +125,7 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 	records := make([]CreditUsageRecord, 0)
 	successes := 0
 	var lastErr error
+	failedAccounts := []string{}
 	for _, account := range accounts {
 		account := account
 		wg.Add(1)
@@ -129,6 +135,7 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 			if err != nil {
 				mu.Lock()
 				lastErr = err
+				failedAccounts = append(failedAccounts, account.accountID)
 				mu.Unlock()
 				return
 			}
@@ -136,6 +143,7 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 			if err := json.Unmarshal(body, &payload); err != nil {
 				mu.Lock()
 				lastErr = err
+				failedAccounts = append(failedAccounts, account.accountID)
 				mu.Unlock()
 				return
 			}
@@ -174,9 +182,9 @@ func (u *Upstream) ListCreditUsage(ctx context.Context) ([]CreditUsageRecord, er
 	wg.Wait()
 	sort.SliceStable(records, func(i, j int) bool { return records[i].CreatedAt > records[j].CreatedAt })
 	if successes == 0 && lastErr != nil {
-		return nil, lastErr
+		return nil, failedAccounts, lastErr
 	}
-	return records, nil
+	return records, failedAccounts, nil
 }
 
 func (u *Upstream) recordLocalCredit(request openai.Request) {

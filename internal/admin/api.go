@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"clodesen2api/internal/admission"
 	"clodesen2api/internal/config"
+	"clodesen2api/internal/controlstore"
+	"clodesen2api/internal/modelpolicy"
 	"clodesen2api/internal/upstream"
 )
 
@@ -18,6 +21,98 @@ const upstreamCacheTTL = time.Hour
 
 func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == "/admin/api/admission/reconcile" && r.Method == http.MethodPost:
+		s.mu.Lock()
+		store := s.admission
+		s.mu.Unlock()
+		if store == nil {
+			writeError(w, 503, "计量存储不可用")
+			return
+		}
+		var input struct {
+			ID      string           `json:"id"`
+			Version int64            `json:"version"`
+			Actual  admission.Amount `json:"actual"`
+		}
+		if err := decodeJSON(w, r, &input); err != nil || input.Version < 1 {
+			writeError(w, 400, "对账参数无效")
+			return
+		}
+		if err := store.Reconcile(r.Context(), input.ID, input.Version, input.Actual); err != nil {
+			writeError(w, 409, "用量已更新或缺少完整计量，请刷新后重试")
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"reconciled": true})
+	case r.URL.Path == "/admin/api/backups" || strings.HasPrefix(r.URL.Path, "/admin/api/backups/"):
+		s.backupRoute(w, r)
+	case r.URL.Path == "/admin/api/cache-status" && r.Method == http.MethodGet:
+		writeJSON(w, 200, s.cacheStatus())
+	case r.URL.Path == "/admin/api/jobs" || strings.HasPrefix(r.URL.Path, "/admin/api/jobs/"):
+		s.jobsRoute(w, r)
+	case r.URL.Path == "/admin/api/admission":
+		s.mu.Lock()
+		store := s.admission
+		s.mu.Unlock()
+		if store == nil {
+			writeError(w, 503, "请求准入不可用")
+			return
+		}
+		if r.Method == http.MethodGet {
+			view, err := store.Snapshot(r.Context())
+			if err != nil {
+				writeError(w, 503, "请求准入存储不可用")
+				return
+			}
+			writeJSON(w, 200, view)
+			return
+		}
+		if r.Method != http.MethodPut {
+			w.Header().Set("Allow", "GET, PUT")
+			writeError(w, 405, "方法不支持")
+			return
+		}
+		var input struct {
+			Revision int64              `json:"revision"`
+			Settings admission.Settings `json:"settings"`
+		}
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, 400, "参数无效")
+			return
+		}
+		if err := input.Settings.Validate(); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		view, err := store.Update(r.Context(), input.Revision, input.Settings)
+		if errors.Is(err, controlstore.ErrConflict) {
+			writeError(w, 409, "准入设置已更新，请刷新重试")
+			return
+		}
+		if err != nil {
+			writeError(w, 503, "保存请求准入失败")
+			return
+		}
+		writeJSON(w, 200, view)
+	case r.URL.Path == "/admin/api/model-cooldowns":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			writeError(w, 405, "方法不支持")
+			return
+		}
+		s.mu.Lock()
+		store := s.modelCooldowns
+		s.mu.Unlock()
+		if store == nil {
+			writeError(w, 503, "模型冷却不可用")
+			return
+		}
+		writeJSON(w, 200, store.Snapshot(r.Context()))
+	case r.URL.Path == "/admin/api/model-policies" || strings.HasPrefix(r.URL.Path, "/admin/api/model-policies/"):
+		s.modelPolicyRoute(w, r)
+	case r.URL.Path == "/admin/api/keys":
+		s.keysRoot(w, r)
+	case strings.HasPrefix(r.URL.Path, "/admin/api/keys/"):
+		s.keyRoute(w, r)
 	case r.URL.Path == "/admin/api/accounts":
 		switch r.Method {
 		case http.MethodGet:
@@ -61,6 +156,7 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.URL.Path == "/admin/api/usage":
 		if r.Method == http.MethodGet {
+			s.refreshAudit(r)
 			writeJSON(w, http.StatusOK, s.usage.Snapshot())
 		} else {
 			w.Header().Set("Allow", "GET")
@@ -108,7 +204,7 @@ func (s *Service) listModels(w http.ResponseWriter, r *http.Request) {
 	writeCachedJSON(w, models, "miss")
 }
 
-func (s *Service) refreshModels(ctx context.Context, force bool) ([]byte, error) {
+func (s *Service) fetchModels(ctx context.Context, force bool) ([]byte, error) {
 	s.modelRefreshMu.Lock()
 	defer s.modelRefreshMu.Unlock()
 	if !force {
@@ -125,6 +221,24 @@ func (s *Service) refreshModels(ctx context.Context, force bool) ([]byte, error)
 	}
 	if err := json.Unmarshal(models, &payload); err != nil {
 		return nil, errors.New("上游模型列表格式无效")
+	}
+	if len(payload.Data) == 0 {
+		cached, _ := s.modelCacheSnapshot()
+		var previous struct {
+			Data []any `json:"data"`
+		}
+		if json.Unmarshal(cached, &previous) == nil && len(previous.Data) > 0 {
+			return nil, errors.New("empty model response cannot replace known catalog")
+		}
+	}
+	if policies := s.currentModelPolicies(); policies != nil {
+		ids, err := modelpolicy.IDs(models)
+		if err != nil {
+			return nil, err
+		}
+		if err := policies.Register(ctx, ids); err != nil {
+			return nil, err
+		}
 	}
 	_, prices, pricingErr := s.upstream.ListPricing(ctx)
 	localPrices := append([]upstream.ModelPricing(nil), prices...)
@@ -172,11 +286,7 @@ func (s *Service) refreshModels(ctx context.Context, force bool) ([]byte, error)
 }
 
 func (s *Service) refreshModelsAsync() {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-		defer cancel()
-		_, _ = s.refreshModels(ctx, false)
-	}()
+	s.refreshes.start("models", func(ctx context.Context) (any, error) { return s.fetchModels(ctx, false) })
 }
 
 func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +304,7 @@ func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ready || time.Since(cachedAt) >= upstreamCacheTTL {
-			go s.refreshCreditUsageAsync()
+			s.refreshCreditUsageAsync()
 		}
 		writeCreditUsage(w, mergeCreditRecords(localRecords, remoteRecords, time.Now()), r, page, pageSize, "stale", accountBalances)
 		return
@@ -211,7 +321,7 @@ func (s *Service) listCreditUsage(w http.ResponseWriter, r *http.Request) {
 	writeCreditUsage(w, mergeCreditRecords(localRecords, remoteRecords, time.Now()), r, page, pageSize, "miss", accountBalances)
 }
 
-func (s *Service) refreshCreditUsage(ctx context.Context, force bool) ([]upstream.CreditUsageRecord, error) {
+func (s *Service) fetchCreditUsage(ctx context.Context, force bool) ([]upstream.CreditUsageRecord, error) {
 	s.creditRefreshMu.Lock()
 	defer s.creditRefreshMu.Unlock()
 	if !force {
@@ -219,12 +329,24 @@ func (s *Service) refreshCreditUsage(ctx context.Context, force bool) ([]upstrea
 			return records, nil
 		}
 	}
-	records, err := s.upstream.ListCreditUsage(ctx)
+	records, partial, err := s.upstream.ListCreditUsageWithFailures(ctx)
+	s.partialRefresh("credits", partial)
 	if err != nil {
 		cached, _, _ := s.creditCacheSnapshot()
 		return cached, err
 	}
 	s.cacheMu.Lock()
+	if len(partial) > 0 {
+		failed := make(map[string]bool, len(partial))
+		for _, id := range partial {
+			failed[id] = true
+		}
+		for _, record := range s.creditUsageCache {
+			if failed[record.AccountID] {
+				records = append(records, record)
+			}
+		}
+	}
 	s.creditUsageCache = append(s.creditUsageCache[:0], records...)
 	s.creditUsageCachedAt = time.Now()
 	s.creditUsageReady = true
@@ -235,11 +357,7 @@ func (s *Service) refreshCreditUsage(ctx context.Context, force bool) ([]upstrea
 }
 
 func (s *Service) refreshCreditUsageAsync() {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-		defer cancel()
-		_, _ = s.refreshCreditUsage(ctx, false)
-	}()
+	s.refreshes.start("credits", func(ctx context.Context) (any, error) { return s.fetchCreditUsage(ctx, false) })
 }
 
 func (s *Service) cachedAccountBalances() map[string]int64 {
@@ -498,12 +616,16 @@ func creditDirection(amount int64) string {
 }
 
 func (s *Service) configRoute(w http.ResponseWriter, r *http.Request) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if s.cfg == nil {
 		writeError(w, http.StatusServiceUnavailable, "配置管理不可用")
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
+	if s.settings != nil {
+		s.savedSettingsRoute(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		settings := s.cfg.PublicSettings()
@@ -672,7 +794,7 @@ func (s *Service) writeAccountsJSON(w http.ResponseWriter, body []byte, cacheSta
 	writeCachedJSON(w, body, cacheState)
 }
 
-func (s *Service) refreshAccounts(ctx context.Context, force bool) ([]byte, error) {
+func (s *Service) fetchAccounts(ctx context.Context, force bool) ([]byte, error) {
 	s.accountRefreshMu.Lock()
 	defer s.accountRefreshMu.Unlock()
 	if !force {
@@ -681,6 +803,13 @@ func (s *Service) refreshAccounts(ctx context.Context, force bool) ([]byte, erro
 		}
 	}
 	statuses := s.upstream.AccountStatuses(ctx)
+	partialFailures := []string{}
+	for _, status := range statuses {
+		if status.Enabled && status.CooldownUntil == nil && strings.TrimSpace(status.Error) != "" {
+			partialFailures = append(partialFailures, status.ID)
+		}
+	}
+	s.partialRefresh("accounts", partialFailures)
 	if len(statuses) > 0 {
 		healthy := 0
 		for _, status := range statuses {
@@ -756,11 +885,7 @@ func accountStatusPayload(status upstream.AccountStatus) map[string]any {
 }
 
 func (s *Service) refreshAccountsAsync() {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
-		defer cancel()
-		_, _ = s.refreshAccounts(ctx, false)
-	}()
+	s.refreshes.start("accounts", func(ctx context.Context) (any, error) { return s.fetchAccounts(ctx, false) })
 }
 
 func writeCachedJSON(w http.ResponseWriter, body []byte, cacheState string) {
@@ -804,10 +929,14 @@ func (s *Service) addAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
-	accounts := s.store.Accounts()
+	accounts, revision, err := s.store.Snapshot()
+	if err != nil {
+		writeError(w, 503, "账号存储不可用")
+		return
+	}
 	accounts = append(accounts, upstream.AccountCredential{ID: id, Identifier: identifier, Password: password, Enabled: true})
-	if err := s.replaceAccountsLocked(accounts); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.replaceAccountsLocked(accounts, revision); err != nil {
+		writeAccountError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -911,7 +1040,11 @@ func (s *Service) updateAccount(w http.ResponseWriter, r *http.Request, id strin
 	}
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
-	accounts := s.store.Accounts()
+	accounts, revision, err := s.store.Snapshot()
+	if err != nil {
+		writeError(w, 503, "账号存储不可用")
+		return
+	}
 	found := false
 	for i := range accounts {
 		if accounts[i].ID != id {
@@ -947,8 +1080,8 @@ func (s *Service) updateAccount(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
-	if err := s.replaceAccountsLocked(accounts); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.replaceAccountsLocked(accounts, revision); err != nil {
+		writeAccountError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -957,7 +1090,11 @@ func (s *Service) updateAccount(w http.ResponseWriter, r *http.Request, id strin
 func (s *Service) deleteAccount(w http.ResponseWriter, id string) {
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
-	accounts := s.store.Accounts()
+	accounts, revision, err := s.store.Snapshot()
+	if err != nil {
+		writeError(w, 503, "账号存储不可用")
+		return
+	}
 	next := make([]upstream.AccountCredential, 0, len(accounts))
 	found := false
 	for _, account := range accounts {
@@ -971,23 +1108,21 @@ func (s *Service) deleteAccount(w http.ResponseWriter, id string) {
 		writeError(w, http.StatusNotFound, "账号不存在")
 		return
 	}
-	if err := s.replaceAccountsLocked(next); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.replaceAccountsLocked(next, revision); err != nil {
+		writeAccountError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Service) replaceAccountsLocked(next []upstream.AccountCredential) error {
+func (s *Service) replaceAccountsLocked(next []upstream.AccountCredential, revision int64) error {
 	if err := validateCredentials(next); err != nil {
 		return err
 	}
-	old := s.store.Accounts()
-	if err := s.upstream.ReplaceAccounts(next); err != nil {
+	if err := s.store.ReplaceVersion(next, revision); err != nil {
 		return err
 	}
-	if err := s.store.Replace(next); err != nil {
-		_ = s.upstream.ReplaceAccounts(old)
+	if err := s.upstream.ReplaceAccounts(next); err != nil {
 		return err
 	}
 	s.invalidateAccountCache()
@@ -1007,6 +1142,27 @@ func (s *Service) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.changeMu.Lock()
 	defer s.changeMu.Unlock()
+	s.configMu.Lock()
+	if s.settings != nil {
+		view, err := s.settings.View(r.Context())
+		if err == nil {
+			view.Auth.Strategy = strategy
+			var hot config.Config
+			_, hot, err = s.settings.Save(r.Context(), view)
+			if err == nil {
+				s.publishSettings(hot)
+			}
+		}
+		s.configMu.Unlock()
+		if err != nil {
+			settingsError(w, err)
+			return
+		}
+		s.invalidateAccountCache()
+		writeJSON(w, 200, map[string]string{"strategy": s.upstream.Strategy()})
+		return
+	}
+	s.configMu.Unlock()
 	old := s.upstream.Strategy()
 	if err := s.upstream.SetStrategy(strategy); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

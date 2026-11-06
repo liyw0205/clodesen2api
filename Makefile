@@ -1,6 +1,7 @@
 APP      := clodesen2api
 CMD      := ./cmd/clodesen2api
 GO       := go
+VERSION  := $(shell tr -d '\r\n' < VERSION)
 BIN_DIR  := bin
 BIN      := $(BIN_DIR)/$(APP)
 
@@ -15,7 +16,7 @@ all: build
 ## build: 编译二进制到 bin/clodesen2api
 build:
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -ldflags "-s -w" -o $(BIN) $(CMD)
+	$(GO) build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BIN) $(CMD)
 
 ## run: 直接 go run（读取 CONFIG 指定的配置文件，默认 config.toml）
 run:

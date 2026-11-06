@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"clodesen2api/internal/config"
 	"clodesen2api/internal/updater"
 )
 
@@ -21,10 +22,13 @@ func (s *Service) updateRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, status)
 	case http.MethodPut:
+		s.configMu.Lock()
 		if s.cfg == nil {
+			s.configMu.Unlock()
 			writeError(w, http.StatusServiceUnavailable, "配置管理不可用")
 			return
 		}
+		s.configMu.Unlock()
 		var selection updater.SourceSelection
 		if err := decodeJSON(w, r, &selection); err != nil {
 			writeError(w, http.StatusBadRequest, "更新源配置格式无效")
@@ -38,6 +42,24 @@ func (s *Service) updateRoute(w http.ResponseWriter, r *http.Request) {
 		selection.ID = option.ID
 		selection.CustomPrefix = strings.TrimSpace(selection.CustomPrefix)
 		s.configMu.Lock()
+		if s.settings != nil {
+			view, saveErr := s.settings.View(r.Context())
+			if saveErr == nil {
+				view.Update.Source, view.Update.CustomPrefix = selection.ID, selection.CustomPrefix
+				var hot config.Config
+				_, hot, saveErr = s.settings.Save(r.Context(), view)
+				if saveErr == nil {
+					s.publishSettings(hot)
+				}
+			}
+			s.configMu.Unlock()
+			if saveErr != nil {
+				settingsError(w, saveErr)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"source": selection.ID, "customPrefix": selection.CustomPrefix})
+			return
+		}
 		previousSource, previousPrefix := s.cfg.Update.Source, s.cfg.Update.CustomPrefix
 		s.cfg.Update.Source = selection.ID
 		s.cfg.Update.CustomPrefix = selection.CustomPrefix
@@ -79,6 +101,22 @@ func (s *Service) updateRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		executable, err := os.Executable()
 		if err == nil {
+			s.mu.Lock()
+			backupStore := s.backups
+			s.mu.Unlock()
+			if backupStore != nil {
+				if flushErr := s.usage.Flush(r.Context()); flushErr != nil {
+					writeError(w, 503, "更新前审计保存失败")
+					return
+				}
+				s.configMu.Lock()
+				_, backupErr := backupStore.Create(r.Context(), true)
+				s.configMu.Unlock()
+				if backupErr != nil {
+					writeError(w, 503, "更新前备份失败")
+					return
+				}
+			}
 			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 			defer cancel()
 			err = updater.Install(ctx, status, executable)

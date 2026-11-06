@@ -9,3 +9,5 @@
 /.packaged-bin.*
 /.github-artifacts/
 /clodesen2api-*.zip
+node_modules/
+test-results/

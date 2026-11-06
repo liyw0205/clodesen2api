@@ -95,6 +95,10 @@ func (u *Upstream) AccountCredentials() []AccountCredential {
 // ReplaceAccounts prepares replacement sessions before swapping the pool. In
 // flight requests keep their old session pointers until they complete.
 func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
+	existing := map[string]*Upstream{}
+	for _, account := range u.accountsSnapshot() {
+		existing[account.accountID] = account
+	}
 	prepared := make([]*Upstream, 0, len(credentials))
 	seenIDs := make(map[string]struct{}, len(credentials))
 	seenIdentifiers := make(map[string]struct{}, len(credentials))
@@ -115,6 +119,10 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 		}
 		seenIDs[credential.ID] = struct{}{}
 		seenIdentifiers[key] = struct{}{}
+		if previous := existing[credential.ID]; previous != nil && previous.cfg.Auth.Identifier == credential.Identifier && previous.cfg.Auth.Password == credential.Password && previous.enabled == credential.Enabled {
+			prepared = append(prepared, previous)
+			continue
+		}
 		accountCfg := *u.cfg
 		accountCfg.Auth.Accounts = ""
 		accountCfg.Auth.Identifier = credential.Identifier

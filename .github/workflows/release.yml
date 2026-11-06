@@ -15,21 +15,48 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ['1.23.x', 'stable']
     steps:
       - name: Check out source
         uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
       - name: Test
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Race
+        if: matrix.go == 'stable'
+        run: go test -race ./internal/...
+
+  web:
+    name: Browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright-core install --with-deps chromium
+      - run: npm run test:web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-screenshots
+          path: test-results/*.png
 
   package:
     name: Package ${{ matrix.name }}
-    needs: test
+    needs: [test, web]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -76,8 +103,12 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: '0'
-          BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v0.2.{0}', github.run_number) }}
         run: |
+          BUILD_VERSION="$(tr -d '\r\n' < VERSION)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$BUILD_VERSION" ]; then
+            echo 'Release tag does not match VERSION' >&2
+            exit 1
+          fi
           mkdir -p build/${{ matrix.name }}/bin
           go build ${{ matrix.buildmode && format('-buildmode={0}', matrix.buildmode) || '' }} \
             -trimpath -ldflags "-s -w -X main.version=$BUILD_VERSION -X main.goarm=${GOARM:-7}" \
@@ -89,7 +120,8 @@ jobs:
           WINDOWS: ${{ matrix.goos == 'windows' && '1' || '0' }}
         run: |
           cp config.example.toml build/$TARGET/
-          cp README.md Makefile go.mod go.sum build/$TARGET/
+          cp README.md Makefile VERSION THIRD_PARTY_NOTICES.md go.mod go.sum build/$TARGET/
+          cp -R docs build/$TARGET/
           cp -R cmd internal build/$TARGET/
           if [ "$WINDOWS" = "1" ]; then
             cp start.bat stop.bat restart.bat build/$TARGET/
@@ -110,10 +142,11 @@ jobs:
 
   release:
     name: Publish Release
-    if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/')
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -124,13 +157,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="$GITHUB_REF_NAME"
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            VERSION="v0.2.${GITHUB_RUN_NUMBER}"
-          fi
-          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" \
-              --title "$VERSION" --notes "Automated, tested multi-platform build."
-          fi
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "$VERSION" --notes-file "docs/releases/$VERSION.md"

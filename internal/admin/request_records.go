@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 )
 
 func (s *Service) listRequestRecords(w http.ResponseWriter, r *http.Request) {
+	s.refreshAudit(r)
 	records := s.usage.RequestRecords()
 	accounts := requestRecordAccounts(records)
 	for index := range records {
@@ -41,8 +43,17 @@ func (s *Service) listRequestRecords(w http.ResponseWriter, r *http.Request) {
 		"total":             total, "page": page, "pageSize": pageSize, "totalPages": totalPages,
 		"hasPrevious": page > 1, "hasNext": page < totalPages,
 		"summary":     summarizeRequestRecords(records),
+		"storage":     s.usage.StorageHealth(),
 		"refreshedAt": time.Now(),
 	})
+}
+
+func (s *Service) refreshAudit(r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+	if err := s.usage.Refresh(ctx); err != nil {
+		s.usage.StorageFailure()
+	}
 }
 
 func filterRequestRecords(records []usage.RequestRecord, r *http.Request) []usage.RequestRecord {
@@ -50,11 +61,15 @@ func filterRequestRecords(records []usage.RequestRecord, r *http.Request) []usag
 	account := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("account")))
 	typeName := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
 	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
-	if model == "" && account == "" && typeName == "" && status == "" {
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if model == "" && account == "" && typeName == "" && status == "" && key == "" {
 		return records
 	}
 	filtered := make([]usage.RequestRecord, 0, len(records))
 	for _, record := range records {
+		if key != "" && record.APIKeyID != key {
+			continue
+		}
 		if model != "" && !strings.Contains(strings.ToLower(record.Model), model) {
 			continue
 		}
@@ -103,6 +118,12 @@ func requestRecordAccounts(records []usage.RequestRecord) []requestRecordAccount
 }
 
 func requestRecordCategory(record usage.RequestRecord) string {
+	if record.Stage == "started" {
+		return "running"
+	}
+	if record.Stage == "interrupted" {
+		return "interrupted"
+	}
 	if record.Success {
 		return "normal"
 	}
@@ -127,6 +148,9 @@ func summarizeRequestRecords(records []usage.RequestRecord) requestRecordSummary
 	var firstTotal int64
 	var firstCount int64
 	for _, record := range records {
+		if record.Stage == "started" {
+			continue
+		}
 		if record.Success {
 			result.Successes++
 		} else {
@@ -139,8 +163,8 @@ func summarizeRequestRecords(records []usage.RequestRecord) requestRecordSummary
 			firstCount++
 		}
 	}
-	if result.Total > 0 {
-		result.AverageDuration = duration / int64(result.Total)
+	if finished := result.Successes + result.Failures; finished > 0 {
+		result.AverageDuration = duration / int64(finished)
 	}
 	if firstCount > 0 {
 		average := firstTotal / firstCount

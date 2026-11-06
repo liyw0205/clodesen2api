@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"clodesen2api/internal/controlstore"
 	"clodesen2api/internal/upstream"
 )
 
@@ -26,6 +28,97 @@ type AccountStore struct {
 	path     string
 	accounts []upstream.AccountCredential
 	strategy string
+	control  *controlstore.Store
+	revision int64
+}
+
+func OpenControlAccounts(control *controlstore.Store, path, strategy string, initial []upstream.AccountCredential) (*AccountStore, error) {
+	s := &AccountStore{path: path, control: control}
+	if _, err := control.Revision(context.Background(), "accounts"); errors.Is(err, controlstore.ErrMissing) {
+		if _, err := os.Stat(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		var saved accountFile
+		if data, err := os.ReadFile(path); err == nil {
+			if err := json.Unmarshal(data, &saved); err != nil {
+				return nil, err
+			}
+			if saved.Version != 1 {
+				return nil, errors.New("unsupported account file version")
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		} else {
+			saved = accountFile{Version: 1, Strategy: strategy, Accounts: initial}
+		}
+		if err := validateCredentials(saved.Accounts); err != nil {
+			return nil, err
+		}
+		if saved.Strategy == "" {
+			saved.Strategy = "fixed"
+		}
+		if normalizeStrategy(saved.Strategy) == "" {
+			return nil, errors.New("invalid account strategy")
+		}
+		if err := control.Import(context.Background(), "accounts", path, saved); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	_, _, err := s.Snapshot()
+	return s, err
+}
+func (s *AccountStore) syncLocked() error {
+	if s.control == nil {
+		return nil
+	}
+	var saved accountFile
+	revision, err := s.control.Load(context.Background(), "accounts", &saved)
+	if err != nil {
+		return err
+	}
+	if saved.Version != 1 || normalizeStrategy(saved.Strategy) == "" {
+		return errors.New("invalid account store")
+	}
+	if err := validateCredentials(saved.Accounts); err != nil {
+		return err
+	}
+	s.accounts = copyCredentials(saved.Accounts)
+	s.strategy = saved.Strategy
+	s.revision = revision
+	return nil
+}
+func (s *AccountStore) Snapshot() ([]upstream.AccountCredential, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.syncLocked(); err != nil {
+		return nil, 0, err
+	}
+	return copyCredentials(s.accounts), s.revision, nil
+}
+func (s *AccountStore) ReplaceVersion(accounts []upstream.AccountCredential, revision int64) error {
+	if s.control == nil {
+		return s.Replace(accounts)
+	}
+	if err := validateCredentials(accounts); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.syncLocked(); err != nil {
+		return err
+	}
+	if revision != s.revision {
+		return controlstore.ErrConflict
+	}
+	next, err := s.control.Save(context.Background(), "accounts", revision, accountFile{Version: 1, Strategy: s.strategy, Accounts: accounts})
+	if err != nil {
+		return err
+	}
+	s.accounts = copyCredentials(accounts)
+	s.revision = next
+	return nil
 }
 
 func OpenAccountStore(path, strategy string, initial []upstream.AccountCredential) (*AccountStore, error) {
@@ -74,18 +167,25 @@ func OpenAccountStore(path, strategy string, initial []upstream.AccountCredentia
 }
 
 func (s *AccountStore) Accounts() []upstream.AccountCredential {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return copyCredentials(s.accounts)
+	accounts, _, _ := s.Snapshot()
+	return accounts
 }
 
 func (s *AccountStore) Strategy() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.syncLocked()
 	return s.strategy
 }
 
 func (s *AccountStore) Replace(accounts []upstream.AccountCredential) error {
+	if s.control != nil {
+		_, revision, err := s.Snapshot()
+		if err != nil {
+			return err
+		}
+		return s.ReplaceVersion(accounts, revision)
+	}
 	if err := validateCredentials(accounts); err != nil {
 		return err
 	}
@@ -105,6 +205,9 @@ func (s *AccountStore) SetStrategy(strategy string) error {
 	if strategy == "" {
 		return errors.New("strategy must be round_robin, random, or fixed")
 	}
+	if s.control != nil {
+		return s.mutate(func(saved *accountFile) error { saved.Strategy = strategy; return nil })
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old := s.strategy
@@ -120,6 +223,21 @@ func (s *AccountStore) SetStrategy(strategy string) error {
 // response. It intentionally does not alter credentials, so an automatic
 // cooldown cannot overwrite a password or identifier update.
 func (s *AccountStore) UpdateRuntimeState(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error {
+	if s.control != nil {
+		return s.mutate(func(saved *accountFile) error {
+			for i := range saved.Accounts {
+				account := &saved.Accounts[i]
+				if account.ID != accountID {
+					continue
+				}
+				account.Enabled = enabled
+				account.CooldownUntil = cooldownUntil
+				account.CooldownReason = cooldownReason
+				return nil
+			}
+			return errors.New("account not found")
+		})
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for index := range s.accounts {
@@ -147,6 +265,31 @@ func (s *AccountStore) UpdateRuntimeState(accountID string, enabled bool, cooldo
 		return nil
 	}
 	return fmt.Errorf("account %q not found", accountID)
+}
+
+func (s *AccountStore) mutate(change func(*accountFile) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.control.Mutate(context.Background(), "accounts", func(raw json.RawMessage) (any, error) {
+		var saved accountFile
+		if err := json.Unmarshal(raw, &saved); err != nil {
+			return nil, err
+		}
+		if saved.Version != 1 {
+			return nil, errors.New("invalid accounts schema")
+		}
+		if err := change(&saved); err != nil {
+			return nil, err
+		}
+		if err := validateCredentials(saved.Accounts); err != nil {
+			return nil, err
+		}
+		return saved, nil
+	})
+	if err != nil {
+		return err
+	}
+	return s.syncLocked()
 }
 
 func (s *AccountStore) writeLocked() error {
@@ -206,7 +349,14 @@ func validateCredentials(accounts []upstream.AccountCredential) error {
 }
 
 func copyCredentials(accounts []upstream.AccountCredential) []upstream.AccountCredential {
-	return append([]upstream.AccountCredential(nil), accounts...)
+	result := append([]upstream.AccountCredential(nil), accounts...)
+	for i := range result {
+		if result[i].CooldownUntil != nil {
+			until := *result[i].CooldownUntil
+			result[i].CooldownUntil = &until
+		}
+	}
+	return result
 }
 
 func normalizeStrategy(strategy string) string {
