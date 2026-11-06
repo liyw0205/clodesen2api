@@ -3,8 +3,11 @@ package redemption
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,17 +20,22 @@ type Client interface {
 }
 
 type Scheduler struct {
-	client   Client
-	at       string
-	loc      *time.Location
-	code     string
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	mu       sync.Mutex
-	lastDate string
+	client    Client
+	at        string
+	loc       *time.Location
+	code      string
+	statePath string
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	mu        sync.Mutex
+	lastDate  string
 }
 
 func NewScheduler(client Client, at, code string) (*Scheduler, error) {
+	return NewSchedulerWithStatePath(client, at, code, "")
+}
+
+func NewSchedulerWithStatePath(client Client, at, code, statePath string) (*Scheduler, error) {
 	if client == nil {
 		return nil, fmt.Errorf("redemption client is nil")
 	}
@@ -43,7 +51,15 @@ func NewScheduler(client Client, at, code string) (*Scheduler, error) {
 	if code == "" {
 		return nil, fmt.Errorf("redemption code is empty")
 	}
-	return &Scheduler{client: client, at: at, loc: loc, code: code, stopCh: make(chan struct{})}, nil
+	statePath = strings.TrimSpace(statePath)
+	lastDate, err := loadSchedulerDate(statePath)
+	if err != nil {
+		return nil, fmt.Errorf("load redemption scheduler state: %w", err)
+	}
+	return &Scheduler{
+		client: client, at: at, loc: loc, code: code, statePath: statePath,
+		stopCh: make(chan struct{}), lastDate: lastDate,
+	}, nil
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -80,26 +96,82 @@ func (s *Scheduler) maybeTick(ctx context.Context, global time.Time) {
 		s.mu.Unlock()
 		return
 	}
+	if s.statePath != "" {
+		if err := saveSchedulerDate(s.statePath, today); err != nil {
+			s.lastDate = today
+			s.mu.Unlock()
+			log.Printf("[redemption] state persistence failed; skipping today's redemption: %v", err)
+			return
+		}
+	}
+	// Record the attempt before calling upstream so errors and restarts cannot
+	// cause the same scheduled redemption to be replayed throughout the day.
+	s.lastDate = today
 	s.mu.Unlock()
 	log.Printf("[redemption] trigger at %s", now.Format(time.RFC3339))
 	results := s.client.RedeemCodeAll(ctx, s.code)
-	successes := 0
-	completed := false
 	for _, result := range results {
-		if result.Status == "success" {
-			successes++
-		}
-		if result.Status != "error" {
-			completed = true
-		}
 		log.Printf("[redemption] account=%s status=%s credits=%v", result.AccountID, result.Status, result.Credits)
 	}
-	if len(results) == 0 {
-		return
+}
+
+func loadSchedulerDate(path string) (string, error) {
+	if path == "" {
+		return "", nil
 	}
-	if successes > 0 || completed {
-		s.mu.Lock()
-		s.lastDate = today
-		s.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	var state struct {
+		LastTriggeredDate string `json:"lastTriggeredDate"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return "", err
+	}
+	if state.LastTriggeredDate == "" {
+		return "", nil
+	}
+	if _, err := time.Parse("2006-01-02", state.LastTriggeredDate); err != nil {
+		return "", fmt.Errorf("invalid lastTriggeredDate: %w", err)
+	}
+	return state.LastTriggeredDate, nil
+}
+
+func saveSchedulerDate(path, date string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".redemption-scheduler-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	data, err := json.Marshal(struct {
+		LastTriggeredDate string `json:"lastTriggeredDate"`
+	}{LastTriggeredDate: date})
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }

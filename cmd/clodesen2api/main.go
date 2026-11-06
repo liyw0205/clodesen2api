@@ -94,7 +94,8 @@ func main() {
 	}
 
 	if cfg.Redemption.Enable && cfg.Redemption.Code != "" && up.AccountCount() > 0 {
-		sch, err := redemption.NewScheduler(up, cfg.Redemption.At, cfg.Redemption.Code)
+		statePath := filepath.Join(filepath.Dir(cfg.Admin.TokenFile), "redemption-scheduler.json")
+		sch, err := redemption.NewSchedulerWithStatePath(up, cfg.Redemption.At, cfg.Redemption.Code, statePath)
 		if err != nil {
 			log.Printf("[boot] 自动兑换调度初始化失败: %v", err)
 		} else {
