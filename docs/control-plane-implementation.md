@@ -1,8 +1,8 @@
 # Control plane implementation
 
 This tracks v0.3.0, adapted from codebuddy2api v1.5.4 to Go and embedded static
-JavaScript. Source implementation is complete; remote delivery gates below
-remain pending until verified. Keep the upstream protocol and account workflows.
+JavaScript. Core implementation and release gates below have passed. Keep the
+upstream protocol and account workflows; runtime limits remain documented below.
 
 Reference comparison, frontend/backend mapping, proposed contracts and acceptance
 criteria: [Chinese implementation plan](codebuddy2api-reference-plan.zh-CN.md).
@@ -72,7 +72,7 @@ criteria: [Chinese implementation plan](codebuddy2api-reference-plan.zh-CN.md).
 - [x] Restore schema/config/document semantic validation and rollback fault injection.
 - [x] Shared RPM/request admission counters and two-store concurrency tests.
 - [x] Shared-instance leases and real two-process Unix restore/restart validation.
-- [ ] Remote release matrix verification.
+- [x] Remote five-platform release matrix verification.
 
 Hard token/credit limits require an operator-verified `upstream-usage-v1` contract
 and conservative integer bounds. Defaults reject these limited calls. Unknown
@@ -91,14 +91,19 @@ replacement-process restore path has not run on Windows.
 - [x] Final five-target cross-builds and source diff review.
 - [x] Staging/secret review; task files committed and pushed as `a65b1b6`.
 - [x] VERSION and release notes; main validates/packages, version tag publishes without clobber.
-- [ ] Commit task files, push main/version and verify remote refs/CI.
+- [x] Commit task files, push main/version and verify remote refs/CI.
 
-Remote run [42309324867](https://github.com/liyw0205/clodesen2api/actions/runs/42309324867)
-passed Go 1.23, stable tests/vet and Linux race. Its slow browser dependency
-installation was cancelled; browser CI now uses the runner's installed Chrome
-on a pinned Ubuntu 24.04 image, with a job timeout. Browser/package/release gates
-are still being verified. Source packages include the browser manifests and
-test fixtures so the documented development checks remain runnable.
+Release [v0.3.0](https://github.com/liyw0205/clodesen2api/releases/tag/v0.3.0)
+targets `5c018b813cc987acb4fcac9b8402df789bcf91c8`. Both
+[main CI](https://github.com/liyw0205/clodesen2api/actions/runs/42310908071) and
+[tag CI](https://github.com/liyw0205/clodesen2api/actions/runs/42312031459)
+passed Go 1.23, stable tests/vet, Linux race, five browser flows and five-platform
+packaging; tag publication also succeeded. The downloaded Termux artifact passed
+SHA-256 validation. Source packages include browser manifests and test fixtures.
+
+The initial run was cancelled during slow apt/font installation. Browser CI now
+uses installed Chrome on pinned Ubuntu 24.04 with a timeout; the replacement run
+passed. The release tag remains immutable; this checklist is a delivery receipt.
 
 The working tree also contains pre-existing unrelated binaries, archives and
 browser artifacts. They must not be staged, removed or reverted for this task.

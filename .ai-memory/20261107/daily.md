@@ -67,3 +67,9 @@ session-id: 20261107-0207
 - **文件**: .github/workflows/release.yml, docs/control-plane-implementation.md
 - **决策**: 主提交a65b1b6已推送。发行源码包补齐tests和npm清单；浏览器CI固定Ubuntu24.04，使用runner已安装Chrome，避免apt依赖安装长时间阻塞，并设15分钟上限。
 - **验证**: 本地最终全量Go/vet/浏览器5项及五平台交叉构建通过，320px真实滚动后保存按钮位于视口内。远端42309324867通过Go1.23/stable/vet/Linux race；浏览器安装依赖耗时8分钟尚未测试，该run取消后将用修正工作流重新验证。
+
+## [07:25] - 交付完成: v0.3.0发布且main/tag CI通过
+
+- **文件**: docs/control-plane-implementation.md, docs/codebuddy2api-reference-plan.zh-CN.md
+- **决策**: 主实现a65b1b6及CI修正5c018b8均已推送，v0.3.0标签指向5c018b8。保持已发布tag不变，仅追加交付记录。
+- **验证**: main run42310908071与tag run42312031459全部成功，含Go1.23/stable/vet/Linux race、浏览器5项、五平台打包；tag Publish Release成功。远端main/tag引用一致；下载Termux包SHA-256正确，包含VERSION/tests/npm清单，未打包运行data。Windows恢复仍只有交叉构建证据。
