@@ -125,6 +125,43 @@ after(async () => {
   }
 });
 
+test("update waits for service restart before reloading", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  let installStarted = false;
+  let healthChecksAfterInstall = 0;
+  await page.route("**/admin/api/update**", async route => {
+    if (route.request().method() === "POST") {
+      installStarted = true;
+      await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ message: "更新已安装，服务即将重启" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", latestVersion: "next", updateAvailable: true, canInstall: true, sources: [] }) });
+  });
+  await page.route("**/healthz", async route => {
+    if (!installStarted) {
+      await route.fulfill({ status: 200, body: "ok" });
+      return;
+    }
+    healthChecksAfterInstall += 1;
+    await route.fulfill({ status: healthChecksAfterInstall === 1 ? 503 : 200, body: healthChecksAfterInstall === 1 ? "restarting" : "ok" });
+  });
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await page.locator("#settings-tab").click();
+  await page.locator("#update-install").waitFor({ state: "visible" });
+  const startedAt = Date.now();
+  const navigation = page.waitForEvent("framenavigated");
+  await page.locator("#update-install").click();
+  await navigation;
+  assert.ok(Date.now() - startedAt < 5000, "reload should follow service recovery, not a fixed five-second delay");
+  assert.ok(healthChecksAfterInstall >= 2);
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await context.close();
+});
+
 test("key lifecycle, policy, audit, conflict and responsive UI", async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();

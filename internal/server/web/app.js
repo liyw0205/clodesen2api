@@ -274,11 +274,54 @@
       const result = await api("/admin/api/update", { method: "POST", body: "{}" });
       $("#update-status").textContent = result.message || "更新已安装，服务即将重启";
       showToast($("#update-status").textContent);
-      window.setTimeout(() => window.location.reload(), 5000);
+      const restarted = await waitForServiceRestart();
+      if (restarted) {
+        $("#update-status").textContent = "服务已恢复，正在刷新页面";
+        showToast($("#update-status").textContent);
+        window.location.reload();
+      } else {
+        $("#update-status").textContent = "服务重启检测超时，请手动刷新页面";
+        showToast($("#update-status").textContent);
+        button.disabled = false;
+      }
     } catch (error) {
       $("#update-status").textContent = error.message;
       button.disabled = false;
     }
+  }
+
+  async function waitForServiceRestart() {
+    const startedAt = Date.now();
+    const timeout = 15000;
+    const interval = 500;
+    let unavailable = false;
+    while (Date.now() - startedAt < timeout) {
+      $("#update-status").textContent = unavailable ? "正在等待服务恢复" : "正在等待服务重启";
+      const remaining = timeout - (Date.now() - startedAt);
+      if (remaining <= 0) break;
+      const controller = new AbortController();
+      const abortTimer = window.setTimeout(() => controller.abort(), Math.min(interval, remaining));
+      try {
+        const response = await window.fetch("/healthz", {
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          if (unavailable) return true;
+        } else {
+          unavailable = true;
+        }
+      } catch {
+        unavailable = true;
+      } finally {
+        window.clearTimeout(abortTimer);
+      }
+      const delay = timeout - (Date.now() - startedAt);
+      if (delay <= 0) break;
+      await new Promise(resolve => window.setTimeout(resolve, Math.min(interval, delay)));
+    }
+    return false;
   }
 
   async function api(path, options = {}) {
