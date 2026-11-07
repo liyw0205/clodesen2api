@@ -43,6 +43,9 @@ test("shared admission settings, request quota and background account actions", 
   const archiveBytes = await archive.body();
   await page.locator("#backup-upload").setInputFiles({ name: "restore.zip", mimeType: "application/zip", buffer: archiveBytes });
   await page.waitForFunction(() => document.querySelector("#backup-validation").textContent.includes("已验证"));
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#storage-panel .backup-delete").first().click();
+  await page.waitForFunction(() => document.querySelectorAll("#storage-panel .backup-item").length === 0);
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.locator("#storage-panel").scrollIntoViewIfNeeded();
@@ -76,6 +79,14 @@ test("shared admission settings, request quota and background account actions", 
     const result = await response.json();
     return result.jobs.some(job => job.id === id && !["queued", "running"].includes(job.state));
   }, created.job.id);
+  await page.locator("#redeem-open").click();
+  await page.locator("#redemption-code").fill("test-code");
+  await page.locator("#select-enabled").click();
+  await page.locator("#redeem-submit").click();
+  await page.locator("#result-dialog").waitFor({ state: "visible" });
+  assert.match(await page.locator("#result-summary").textContent(), /成功 1 \/ 1 个账号/);
+  assert.match(await page.locator("#result-list").textContent(), /到账 500 积分/);
+  await page.locator("[data-close='result-dialog']").last().click();
   assert.equal(await page.locator("#jobs-panel").count(), 0);
   await page.reload();
   await page.locator("#dashboard").waitFor({ state: "visible" });

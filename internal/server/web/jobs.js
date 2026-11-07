@@ -13,17 +13,21 @@
         const result = await api("/admin/api/jobs"); if (epoch !== generation) return;
         const jobs = result.jobs || [];
         let completed = false;
+        const completedJobs = [];
         for (const job of jobs) {
           if (active(job)) { poll = true; continue; }
           if (previous.get(job.id) || submitted.has(job.id)) completed = true;
           if (submitted.has(job.id)) {
             const name = kinds[job.kind] || "操作";
-            showToast(job.state === "succeeded" ? name + "已完成" : name + "未全部完成，请查看账号状态");
+            completedJobs.push(job);
+            if (job.kind !== "redeem") {
+              showToast(job.state === "succeeded" ? name + "已完成" : name + "未全部完成，请查看账号状态");
+            }
             submitted.delete(job.id);
           }
         }
         previous = new Map(jobs.filter(active).map(job => [job.id, true]));
-        if (completed) onComplete();
+        if (completed) onComplete(completedJobs);
       } catch (_) { poll = previous.size > 0; }
       finally {
         if (epoch === generation) {
@@ -37,7 +41,7 @@
       const result = await api("/admin/api/jobs", { method: "POST", body: JSON.stringify({ kind, accountIds, code }) });
       if (epoch !== generation) return;
       submitted.set(result.job.id, kind);
-      showToast((kinds[kind] || "操作") + "已提交"); await load();
+      showToast(kind === "redeem" ? "兑换处理中，完成后显示结果" : (kinds[kind] || "操作") + "已提交"); await load();
     }
     return { load, submit, clear() { generation++; window.clearTimeout(timer); timer = null; loading = false; previous.clear(); submitted.clear(); } };
   };

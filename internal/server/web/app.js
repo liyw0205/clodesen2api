@@ -1450,8 +1450,32 @@
   }
 
   function showResults(result) {
-    $("#result-title").textContent = result.successCount === result.totalCount ? "兑换完成" : "兑换部分完成";
-    $("#result-summary").textContent = "成功 " + formatNumber(result.successCount) + " / " + formatNumber(result.totalCount) +
+    if (Array.isArray(result.items)) {
+      const results = result.items.map(item => {
+        let payload = {};
+        try { payload = typeof item.result === "string" ? JSON.parse(item.result) : (item.result || {}); } catch (_) {}
+        const status = payload.status || (item.state === "succeeded" ? "success" : "error");
+        const account = state.accounts.find(candidate => candidate.id === item.target);
+        return {
+          account: payload.account || payload.identifier || account?.identifier || item.target || "账号",
+          status,
+          message: payload.message || (item.error === "operation_failed" ? "兑换失败" : item.error || status),
+          credits: payload.credits,
+        };
+      });
+      let totalCredits = 0;
+      for (const item of results) if (item.status === "success" && Number.isFinite(Number(item.credits))) totalCredits += Number(item.credits);
+      result = {
+        results,
+        successCount: results.filter(item => item.status === "success").length,
+        totalCount: results.length,
+        totalCredits,
+      };
+    }
+    const successCount = Number(result.successCount) || 0;
+    const totalCount = Number(result.totalCount) || 0;
+    $("#result-title").textContent = successCount === totalCount && totalCount > 0 ? "兑换完成" : successCount > 0 ? "兑换部分完成" : "兑换未完成";
+    $("#result-summary").textContent = "成功 " + formatNumber(successCount) + " / " + formatNumber(totalCount) +
       " 个账号，到账 " + formatNumber(result.totalCredits) + " 积分。失败账号不会自动重试。";
     const list = $("#result-list");
     list.replaceChildren();
@@ -1462,6 +1486,7 @@
       row.append(name, details);
       list.append(row);
     }
+    if (resultDialog.open) resultDialog.close();
     resultDialog.showModal();
   }
 
@@ -1646,7 +1671,11 @@
   const modelPolicies = window.createModelPolicies({ api, element, showToast, render: renderModels });
   const admissionControl = window.createAdmission({ api, element });
   const storageManagement = window.createStorage({ api, element, formatTime });
-  const jobManagement = window.createJobs({ api, showToast, onComplete: () => { void refresh(false, true); void loadRedemptionHistory(); } });
+  const jobManagement = window.createJobs({ api, showToast, onComplete: jobs => {
+    void refresh(false, true);
+    void loadRedemptionHistory();
+    for (const job of jobs || []) if (job.kind === "redeem") showResults(job);
+  } });
   const keyManagement = window.createKeyManagement({ api, element, formatTime, formatNumber, showToast, openRecords: id => {
     state.requestRecordFilters = { model: "", account: "", type: "", status: "", key: id };
     state.requestRecordsPage = 1;

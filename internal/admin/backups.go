@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -115,8 +116,20 @@ func (s *Service) backupRoute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, plan)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/admin/api/backups/") && r.Method == http.MethodGet {
+	if strings.HasPrefix(r.URL.Path, "/admin/api/backups/") && (r.Method == http.MethodGet || r.Method == http.MethodDelete) {
 		id := strings.TrimPrefix(r.URL.Path, "/admin/api/backups/")
+		if r.Method == http.MethodDelete {
+			if err := store.Delete(id); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					writeError(w, 404, "备份不存在")
+				} else {
+					writeError(w, 400, "备份标识无效")
+				}
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		path, err := store.Path(id)
 		if err != nil {
 			writeError(w, 404, "备份不存在")

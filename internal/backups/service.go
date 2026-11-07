@@ -236,6 +236,15 @@ func (s *Service) Path(id string) (string, error) {
 	}
 	return filepath.Join(s.dir, id+".zip"), nil
 }
+func (s *Service) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path, err := s.Path(id)
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
+}
 func (s *Service) List() ([]Record, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

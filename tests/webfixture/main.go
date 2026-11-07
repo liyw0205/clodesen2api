@@ -59,7 +59,11 @@ func main() {
 		case "/api/checkin":
 			result = map[string]any{"enabled": true, "checkedIn": true, "balance": 1234}
 		case "/api/limited-redemption":
-			result = map[string]any{"enabled": true, "remaining": 2, "limit": 3}
+			if r.Method == http.MethodPost {
+				result = map[string]any{"redemption": map[string]int{"credits": 500}, "status": map[string]int{"remaining": 1}}
+			} else {
+				result = map[string]any{"enabled": true, "remaining": 2, "limit": 3}
+			}
 		case "/api/credits":
 			result = map[string]any{"pricing": map[string]any{"models": []any{}}}
 		case "/api/account":

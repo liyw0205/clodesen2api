@@ -169,3 +169,33 @@ func TestRejectsArchiveTraversal(t *testing.T) {
 		t.Fatal("wrote traversal path")
 	}
 }
+
+func TestDeleteBackup(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := controlstore.Open(filepath.Join(root, "control.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := New(db, filepath.Join(root, "backups"), "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(record.ID); err != nil {
+		t.Fatalf("delete backup: %v", err)
+	}
+	if records, err := store.List(); err != nil || len(records) != 0 {
+		t.Fatalf("deleted backup still listed: %v %+v", err, records)
+	}
+	if err := store.Delete(record.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second delete error = %v, want not exist", err)
+	}
+	if err := store.Delete("not-a-backup"); err == nil {
+		t.Fatal("invalid backup ID accepted")
+	}
+}

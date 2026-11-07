@@ -511,3 +511,38 @@ textarea:focus-visible { outline: 2px solid #397383; outline-offset: 3px; }
   .main-tab { padding-inline: 0; }
   .main-tab span:last-child { white-space: normal; overflow-wrap: anywhere; }
 }
+
+/* Storage controls stay compact while making each backup's lifecycle clear. */
+.storage-section { display: grid; gap: 16px; }
+.storage-heading { display: flex; align-items: start; justify-content: space-between; gap: 20px; }
+.storage-heading-copy { min-width: 0; }
+.storage-heading-copy h2 { margin-bottom: 4px; }
+.storage-heading-copy p:last-child { margin-bottom: 0; }
+.storage-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.backup-upload-control { position: relative; display: inline-flex; cursor: pointer; }
+.backup-upload-control input { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.backup-upload-control input:focus-visible + span { outline: 2px solid #397383; outline-offset: 3px; }
+.backup-status { min-height: 16px; }
+.backup-restore { justify-self: start; }
+.backup-list { display: grid; gap: 10px; }
+.backup-empty { padding: 20px 0; }
+.backup-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-small); }
+.backup-item-details { display: grid; gap: 5px; min-width: 0; }
+.backup-item-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.backup-item-title strong { font-size: 14px; line-height: 20px; }
+.backup-kind { padding: 2px 7px; color: var(--muted); background: var(--surface-soft); border-radius: 999px; font-size: 11px; line-height: 16px; }
+.backup-item-meta { color: var(--muted); font-size: 12px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.backup-item-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 4px; }
+.backup-item-actions .button { min-height: 34px; }
+.backup-delete { color: var(--red); }
+.backup-delete:hover { color: #8f3832; }
+
+@media (max-width: 680px) {
+  .storage-heading { display: block; }
+  .storage-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .storage-actions > * { width: 100%; }
+  .storage-actions .button { width: 100%; }
+  .backup-item { align-items: start; padding: 13px 14px; }
+  .backup-item-actions { align-items: start; }
+  .backup-item-actions .button { padding-inline: 8px; }
+}

@@ -1,15 +1,22 @@
 (() => {
   "use strict";
   window.createStorage = ({ api, element, formatTime }) => {
-    const section = element("section", "settings-section"); section.id = "storage-panel";
-    section.append(element("h2", "", "存储与备份"), element("p", "field-note", "完整备份包含账号凭据、密钥摘要、会话、设置和审计数据。"));
-    const create = element("button", "button button-secondary", "创建完整备份"); create.type = "button";
-    const label = element("label", "", "校验恢复备份");
-    const upload = element("input"); upload.type = "file"; upload.accept = ".zip"; upload.id = "backup-upload"; label.append(upload);
+    const section = element("section", "settings-section storage-section"); section.id = "storage-panel";
+    const heading = element("div", "storage-heading");
+    const copy = element("div", "storage-heading-copy");
+    copy.append(element("p", "section-kicker", "DATA SAFETY"), element("h2", "", "存储与备份"), element("p", "muted", "完整备份包含账号凭据、密钥摘要、会话、设置和审计数据。"));
+    heading.append(copy);
+    const actions = element("div", "storage-actions");
+    const create = element("button", "button button-primary", "创建完整备份"); create.type = "button";
+    const label = element("label", "backup-upload-control");
+    const uploadText = element("span", "button button-secondary", "校验恢复备份"); uploadText.setAttribute("aria-hidden", "true");
+    const upload = element("input"); upload.type = "file"; upload.accept = ".zip"; upload.id = "backup-upload"; upload.setAttribute("aria-label", "选择备份文件"); label.append(uploadText, upload);
+    actions.append(create, label);
     const error = element("p", "form-error"); error.setAttribute("role", "alert");
-    const result = element("p", "field-note"); result.id = "backup-validation"; result.setAttribute("role", "status");
-    const list = element("div", "jobs-list"); section.append(create, label, error, result, list);
-    const restore = element("button", "button button-secondary", "恢复此备份并重启"); restore.type = "button"; restore.hidden = true; section.append(restore);
+    const result = element("p", "field-note backup-status"); result.id = "backup-validation"; result.setAttribute("role", "status");
+    const list = element("div", "backup-list");
+    section.append(heading, actions, error, result, list);
+    const restore = element("button", "button button-secondary backup-restore", "恢复此备份并重启"); restore.type = "button"; restore.hidden = true; section.append(restore);
     document.querySelector("#settings-view").append(section);
     let generation = 0;
     let currentPlan = null;
@@ -20,11 +27,26 @@
         const status = await api("/admin/api/backups/restore-status"); if (epoch !== generation) return;
         if (status.state === "restored") result.textContent = "已恢复 · " + formatTime(status.verifiedAt);
         list.replaceChildren();
-        if (!payload.backups.length) list.append(element("p", "field-note", "暂无备份"));
+        if (!payload.backups.length) list.append(element("p", "field-note backup-empty", "暂无备份"));
         for (const item of payload.backups) {
-          const row = element("div", "job-row");
-          row.append(element("span", "", formatTime(item.createdAt) + " · " + Math.ceil(item.size / 1024) + " KB · " + (item.automatic ? "自动备份" : "手动备份") + " "));
-          const link = element("a", "text-button", "下载"); link.href = "/admin/api/backups/" + encodeURIComponent(item.id); link.download = item.id + ".zip"; row.append(link); list.append(row);
+          const row = element("article", "backup-item");
+          const details = element("div", "backup-item-details");
+          const title = element("div", "backup-item-title");
+          title.append(element("strong", "", item.automatic ? "自动备份" : "手动备份"), element("span", "backup-kind", item.automatic ? "定时保留" : "可手动删除"));
+          details.append(title, element("span", "backup-item-meta", formatTime(item.createdAt) + " · " + Math.ceil(item.size / 1024) + " KB"));
+          const itemActions = element("div", "backup-item-actions");
+          const link = element("a", "button button-quiet", "下载"); link.href = "/admin/api/backups/" + encodeURIComponent(item.id); link.download = item.id + ".zip";
+          const remove = element("button", "button button-quiet backup-delete", "删除"); remove.type = "button"; remove.setAttribute("aria-label", "删除" + (item.automatic ? "自动" : "手动") + "备份");
+          remove.addEventListener("click", async () => {
+            if (!window.confirm("删除这份备份？删除后无法恢复。")) return;
+            const epoch = generation; remove.disabled = true; error.textContent = "";
+            try {
+              await api("/admin/api/backups/" + encodeURIComponent(item.id), { method: "DELETE" });
+              if (epoch === generation) { result.textContent = "备份已删除"; await load(); }
+            } catch (failure) { if (epoch === generation) error.textContent = failure.message; }
+            finally { remove.disabled = false; }
+          });
+          itemActions.append(link, remove); row.append(details, itemActions); list.append(row);
         }
       } catch (failure) { if (epoch === generation) error.textContent = failure.message; }
     }

@@ -46,7 +46,10 @@ func (s *Service) executeJob(ctx context.Context, kind, target string, params js
 			return nil, err
 		}
 		result := s.upstream.RedeemCode(ctx, target, input.Code)
-		payload := map[string]any{"accountId": target, "status": result.Status, "credits": result.Credits}
+		payload := map[string]any{
+			"accountId": target, "account": accountIdentifier(result.Identifier),
+			"status": result.Status, "message": result.Message, "credits": result.Credits,
+		}
 		if result.Status != "success" {
 			return payload, errors.New("redemption_failed")
 		}
