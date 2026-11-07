@@ -2,15 +2,40 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"clodesen2api/internal/controlstore"
 	"clodesen2api/internal/usage"
 )
 
 func (s *Service) listRequestRecords(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+	query := r.URL.Query()
+	result, err := s.usage.QueryRecords(ctx, controlstore.AuditFilter{Model: query.Get("model"), Account: query.Get("account"), Type: query.Get("type"), Status: query.Get("status"), Key: strings.TrimSpace(query.Get("key")), Page: queryPositiveInt(r, "page", 1, 1, 1000000), PageSize: queryPositiveInt(r, "pageSize", 20, 1, 100)})
+	if err != nil {
+		s.usage.StorageFailure()
+		writeError(w, http.StatusServiceUnavailable, "请求审计存储不可用，请稍后重试")
+		return
+	}
+	if result != nil {
+		records := make([]usage.RequestRecord, 0, len(result.Records))
+		for _, raw := range result.Records {
+			var record usage.RequestRecord
+			if err := json.Unmarshal(raw, &record); err != nil {
+				writeError(w, 503, "请求审计记录无效")
+				return
+			}
+			record.StatusCategory = requestRecordCategory(record)
+			records = append(records, record)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"records": records, "availableAccounts": result.Accounts, "total": result.Total, "page": result.Page, "pageSize": result.PageSize, "totalPages": result.TotalPages, "hasPrevious": result.Page > 1, "hasNext": result.Page < result.TotalPages, "summary": result.Summary, "storage": s.usage.StorageHealth(), "refreshedAt": time.Now()})
+		return
+	}
 	s.refreshAudit(r)
 	records := s.usage.RequestRecords()
 	accounts := requestRecordAccounts(records)

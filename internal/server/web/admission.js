@@ -2,6 +2,7 @@
   "use strict";
   window.createAdmission = ({ api, element }) => {
     const section = element("section", "settings-section");
+    section.id = "admission-panel";
     section.append(element("h2", "", "请求准入"));
     const form = element("form", "settings-form");
     const grid = element("div", "settings-grid");

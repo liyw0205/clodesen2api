@@ -18,9 +18,11 @@
     section.append(heading, actions, error, result, list);
     const restore = element("button", "button button-secondary backup-restore", "恢复此备份并重启"); restore.type = "button"; restore.hidden = true; section.append(restore);
     document.querySelector("#settings-view").append(section);
+    const schedule = window.createBackupSchedule({ api, element, formatTime, parent: section });
     let generation = 0;
     let currentPlan = null;
     async function load() {
+      void schedule.load();
       const epoch = generation;
       try {
         const payload = await api("/admin/api/backups"); if (epoch !== generation) return;
@@ -52,7 +54,7 @@
     }
     create.addEventListener("click", async () => {
       const epoch = generation; create.disabled = true; error.textContent = "";
-      try { await api("/admin/api/backups", { method: "POST" }); if (epoch === generation) await load(); }
+      try { await api("/admin/api/backups", { method: "POST", timeout: 120000 }); if (epoch === generation) await load(); }
       catch (failure) { if (epoch === generation) error.textContent = failure.message; }
       finally { if (epoch === generation) create.disabled = false; }
     });
@@ -61,10 +63,7 @@
       currentPlan = null; restore.hidden = true;
       const epoch = generation; upload.disabled = true; error.textContent = ""; result.textContent = "正在校验";
       try {
-        const response = await fetch("/admin/api/backups/validate", { method: "POST", body: file, credentials: "same-origin", cache: "no-store" });
-        if (response.status === 401) { await api("/admin/api/backups"); return; }
-        const plan = await response.json(); if (epoch !== generation) return;
-        if (!response.ok) throw new Error(plan.error || "校验失败");
+        const plan = await api("/admin/api/backups/validate", { method: "POST", body: file, timeout: 120000 }); if (epoch !== generation) return;
         currentPlan = plan; restore.hidden = false;
         result.textContent = "已验证 · 版本 " + plan.manifest.version + " · " + plan.manifest.entries.length + " 个文件 · 有效至 " + formatTime(plan.expiresAt);
       } catch (failure) { if (epoch === generation) { result.textContent = ""; error.textContent = failure.message; } }
@@ -77,6 +76,6 @@
       catch (failure) { if (epoch === generation) error.textContent = failure.message; }
       finally { if (epoch === generation) restore.disabled = false; }
     });
-    return { load, clear() { generation++; currentPlan = null; restore.hidden = true; restore.disabled = false; create.disabled = false; upload.disabled = false; upload.value = ""; list.replaceChildren(); error.textContent = ""; result.textContent = ""; } };
+    return { load, clear() { generation++; schedule.clear(); currentPlan = null; restore.hidden = true; restore.disabled = false; create.disabled = false; upload.disabled = false; upload.value = ""; list.replaceChildren(); error.textContent = ""; result.textContent = ""; } };
   };
 })();

@@ -42,6 +42,15 @@ func TestRestoreRejectsSemanticallyInvalidControlDocuments(t *testing.T) {
 	if err := ValidateControlBackup(ctx, dir, base); err != nil {
 		t.Fatal(err)
 	}
+	for _, strategy := range []string{"weighted", "least_inflight", "latency"} {
+		revision, _ := db.Revision(ctx, "accounts")
+		if _, err := db.Save(ctx, "accounts", revision, json.RawMessage(`{"version":1,"strategy":"`+strategy+`","accounts":[]}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateControlBackup(ctx, dir, base); err != nil {
+			t.Fatalf("legacy account backup rejected: %v", err)
+		}
+	}
 	for name, invalid := range map[string]json.RawMessage{
 		"api-keys": json.RawMessage(`{"version":99,"keys":[]}`),
 		"accounts": json.RawMessage(`{"version":1,"strategy":"invalid"}`),

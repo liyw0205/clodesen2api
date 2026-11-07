@@ -21,10 +21,12 @@ func (s *Service) RunSchedules(ctx context.Context) {
 	}
 }
 func (s *Service) scheduleJobs(ctx context.Context, now time.Time) {
+	defer s.scheduleAlerts(ctx, now)
 	if err := s.SyncSettings(ctx); err != nil {
 		log.Printf("[jobs] scheduled settings unavailable")
 		return
 	}
+	defer s.scheduleBackup(ctx, now)
 	s.mu.Lock()
 	store := s.jobs
 	s.mu.Unlock()
@@ -79,5 +81,20 @@ func (s *Service) scheduleJobs(ctx context.Context, now time.Time) {
 				log.Printf("[jobs] scheduled redemption submission failed")
 			}
 		}
+	}
+}
+
+func (s *Service) scheduleBackup(ctx context.Context, now time.Time) {
+	s.mu.Lock()
+	store, draining := s.backups, s.draining
+	s.mu.Unlock()
+	if store == nil || draining {
+		return
+	}
+	s.configMu.Lock()
+	_, err := store.RunScheduled(ctx, now, s.usage.Flush)
+	s.configMu.Unlock()
+	if err != nil {
+		log.Printf("[backups] scheduled backup failed")
 	}
 }

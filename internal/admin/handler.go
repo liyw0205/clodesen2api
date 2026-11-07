@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -77,6 +78,8 @@ type Service struct {
 	backups             *backups.Service
 	requestRestore      func() bool
 	draining            bool
+	loginSecurity       loginSecurity
+	startedAt           time.Time
 }
 
 func (s *Service) SetAdmission(store *admission.Store) {
@@ -210,6 +213,12 @@ func NewServiceWithConfig(up *upstream.Upstream, store *AccountStore, token, tok
 		sessions: make(map[string]time.Time), localCreditPath: creditPath, cachePath: cachePath,
 		redemptionPath: redemptionPath, cfg: cfg,
 	}
+	service.startedAt = time.Now()
+	trustedProxies := ""
+	if cfg != nil {
+		trustedProxies = cfg.API.TrustedProxies
+	}
+	service.loginSecurity.resolver, _ = apikey.NewAuthenticator("", nil, false, trustedProxies)
 	service.localCreditUsage = loadLocalCreditUsage(creditPath)
 	service.redemptionHistory = loadRedemptionHistory(redemptionPath)
 	service.loadPersistentCache()
@@ -271,6 +280,24 @@ func (s *Service) handleSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "管理接口未配置账号存储")
 			return
 		}
+		ip := s.loginIP(r)
+		wait, err := s.admitLogin(r.Context(), ip, time.Now())
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "登录保护存储不可用")
+			return
+		}
+		if wait > 0 {
+			rejectLoginWait(w, wait)
+			return
+		}
+		event := "invalid_request"
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			if err := s.recordLogin(ctx, ip, event, time.Now()); err != nil {
+				log.Printf("[admin] login event storage failed")
+			}
+		}()
 		var body struct {
 			Token   string `json:"token"`
 			Confirm string `json:"confirm"`
@@ -305,11 +332,16 @@ func (s *Service) handleSession(w http.ResponseWriter, r *http.Request) {
 			}
 			current = s.token
 			s.tokenMu.Unlock()
-		} else if len(body.Token) != len(current) || subtle.ConstantTimeCompare([]byte(body.Token), []byte(current)) != 1 {
+		}
+		if len(body.Token) != len(current) || subtle.ConstantTimeCompare([]byte(body.Token), []byte(current)) != 1 {
+			event = "failure"
 			writeError(w, http.StatusUnauthorized, "令牌不正确")
 			return
 		}
-		s.createSession(w, r)
+		event = "session_failed"
+		if s.createSession(w, r) {
+			event = "success"
+		}
 	case http.MethodDelete:
 		if cookie, err := r.Cookie(sessionCookie); err == nil {
 			if err := s.changeSession(cookie.Value, nil); err != nil {
@@ -328,16 +360,16 @@ func (s *Service) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Service) createSession(w http.ResponseWriter, r *http.Request) {
+func (s *Service) createSession(w http.ResponseWriter, r *http.Request) bool {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法创建登录会话")
-		return
+		return false
 	}
 	session, expires := hex.EncodeToString(raw), time.Now().Add(12*time.Hour)
 	if err := s.changeSession(session, &expires); err != nil {
 		writeError(w, 503, "无法保存登录会话")
-		return
+		return false
 	}
 	s.mu.Lock()
 	if s.control == nil {
@@ -350,6 +382,7 @@ func (s *Service) createSession(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: 12 * 60 * 60,
 	})
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	return true
 }
 
 func (s *Service) currentToken() string {

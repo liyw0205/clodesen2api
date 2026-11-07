@@ -22,6 +22,7 @@ type Config struct {
 	path           string
 	sources        map[string]string
 	ScheduleRearms map[string]time.Time `json:"-"`
+	Cache          CacheSettings
 	Server         struct {
 		Addr string
 	}
@@ -71,6 +72,7 @@ type Config struct {
 
 // PublicSettings excludes credentials and tokens from the management API.
 type PublicSettings struct {
+	Cache    CacheSettings         `json:"cache"`
 	Revision int64                 `json:"revision,omitempty"`
 	Fields   map[string]FieldState `json:"fields,omitempty"`
 	Server   struct {
@@ -134,7 +136,7 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Auth.Identifier, "identifier", "auth", "identifier", "", "登录账号(邮箱/用户名)")
 	flag.StringConfigVar(&c.Auth.Password, "password", "auth", "password", "", "登录密码")
 	flag.StringConfigVar(&c.Auth.Accounts, "accounts", "auth", "accounts", "", "逗号分隔的账号列表，元素格式为 identifier:password")
-	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "fixed", "账号选择策略：round_robin、random 或 fixed")
+	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "fixed", "账号选择策略：fixed、round_robin 或 random")
 	flag.IntConfigVar(&c.Auth.RPM, "account-rpm", "auth", "rpm", 4, "每个账号允许同时处理的请求数")
 	flag.BoolConfigVar(&c.Auth.AutoRelogin, "auto-relogin", "auth", "auto_relogin", true, "401 时是否自动重新登录")
 	flag.StringConfigVar(&c.Admin.Token, "admin-token", "admin", "token", "", "管理后台访问令牌（首次设置为 6-20 个字符）")
@@ -154,6 +156,9 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Redemption.Code, "auto-redeem-code", "redemption", "code", "", "自动兑换码")
 	flag.StringConfigVar(&c.Update.Source, "update-source", "update", "source", "builtin:gh-proxy-com", "版本更新下载源")
 	flag.StringConfigVar(&c.Update.CustomPrefix, "update-custom-prefix", "update", "custom_prefix", "", "自定义 GitHub 加速前缀")
+	flag.IntConfigVar(&c.Cache.AccountsSeconds, "cache-accounts-seconds", "cache", "accounts_seconds", 3600, "账号缓存有效时间（秒）")
+	flag.IntConfigVar(&c.Cache.ModelsSeconds, "cache-models-seconds", "cache", "models_seconds", 3600, "模型缓存有效时间（秒）")
+	flag.IntConfigVar(&c.Cache.CreditsSeconds, "cache-credits-seconds", "cache", "credits_seconds", 3600, "积分记录缓存有效时间（秒）")
 
 	flag.StringVar(&c.path, "c", c.path, "配置文件路径")
 	if err := flag.Parse(); err != nil {
@@ -176,6 +181,7 @@ func (c *Config) ConfigFilePath() string {
 
 func (c *Config) PublicSettings() PublicSettings {
 	var out PublicSettings
+	out.Cache = c.Cache.defaults()
 	out.Server.Addr = c.Server.Addr
 	out.Upstream.BaseURL, out.Upstream.OpenAIBaseURL, out.Upstream.LoginPath = c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath
 	out.Upstream.LoginTimeout, out.Upstream.RequestTimeout, out.Upstream.UserAgent = c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent
@@ -201,12 +207,16 @@ func (c *Config) PublicSettings() PublicSettings {
 }
 
 func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
+	cache, err := settings.Cache.validate(c.Cache)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(settings.Server.Addr) == "" {
 		return errors.New("监听地址不能为空")
 	}
-	strategy := strings.ToLower(strings.TrimSpace(settings.Auth.Strategy))
-	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
-		return errors.New("账号策略必须是 round_robin、random 或 fixed")
+	strategy := NormalizeStrategy(settings.Auth.Strategy)
+	if strategy == "" {
+		return errors.New("账号策略无效")
 	}
 	rpm := settings.Auth.RPM
 	if rpm == 0 {
@@ -312,6 +322,7 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	}
 	c.Update.Source = updateSource
 	c.Update.CustomPrefix = customPrefix
+	c.Cache = cache
 	return nil
 }
 
@@ -407,13 +418,18 @@ code = %q
 [update]
 source = %q
 custom_prefix = %q
+
+[cache]
+accounts_seconds = %d
+models_seconds = %d
+credits_seconds = %d
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
 		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin,
 		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.API.Key, c.API.KeysFile, c.API.AllowNoAuth, c.API.TrustedProxies,
 		c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
 		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code,
-		c.Update.Source, c.Update.CustomPrefix)
+		c.Update.Source, c.Update.CustomPrefix, c.Cache.defaults().AccountsSeconds, c.Cache.defaults().ModelsSeconds, c.Cache.defaults().CreditsSeconds)
 	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
@@ -480,4 +496,8 @@ code = ""
 [update]
 source = "builtin:gh-proxy-com"
 custom_prefix = ""
+[cache]
+accounts_seconds = 3600
+models_seconds = 3600
+credits_seconds = 3600
 `

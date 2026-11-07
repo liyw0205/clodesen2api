@@ -143,7 +143,7 @@ func applyPending(ctx context.Context, dir, dbPath string, files map[string]stri
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		return false, err
 	}
-	if manifest.Format != 1 || manifest.Schema != controlstore.SchemaVersion || manifest.Scope != "full" {
+	if manifest.Format != 1 || (manifest.Schema != controlstore.SchemaVersion && manifest.Schema != 2) || manifest.Scope != "full" {
 		return false, errors.New("invalid restore manifest")
 	}
 	targets := map[string]string{"control.sqlite3": dbPath}

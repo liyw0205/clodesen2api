@@ -7,6 +7,28 @@ upstream protocol and account workflows; runtime limits remain documented below.
 Reference comparison, frontend/backend mapping, proposed contracts and acceptance
 criteria: [Chinese implementation plan](codebuddy2api-reference-plan.zh-CN.md).
 
+## v0.3.4 Extension
+
+The optimization work after this release adds resilient resource loading, account
+filters/batch actions, saved navigation, connection templates, a task center,
+request diagnosis, login protection, readiness/runtime status, indexed audit
+queries, grouped settings, per-resource cache TTLs and scheduled backups. It also
+adds 31-day compact reports with upgrade coverage, 13 default-off notification
+channels, responsive sidebar navigation, floating routing/update-source selectors
+and a client-key call playground. Routing retains fixed, round-robin and random
+selection; retired stored modes fall back to fixed. Earlier release
+receipts below describe that release, not the current task-center behavior.
+
+Scope and validation: [optimization plan](optimization-development-plan.zh-CN.md).
+Management responses and coverage: [管理 API](admin-api.zh-CN.md).
+
+The management router now delegates model catalog, credit ledger/statistics,
+account snapshots, settings, admission and redemption to separate files. The
+frontend separates account actions, request records, analytics presentation and
+settings from session/navigation wiring. Conflict recovery preserves local edits;
+audit dialogs clear on close/logout. Current workspace validation passes Go tests,
+vet and 22 browser flows; this does not change the release receipts below.
+
 ## P0 - API key lifecycle and UI
 
 - [x] Hash-only storage, create/update/disable/expire/delete/rotate, optimistic version.

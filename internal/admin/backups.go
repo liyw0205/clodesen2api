@@ -8,6 +8,7 @@ import (
 
 	"clodesen2api/internal/backups"
 	"clodesen2api/internal/config"
+	"clodesen2api/internal/controlstore"
 )
 
 func BackupFiles(cfg *config.Config) map[string]string {
@@ -20,6 +21,41 @@ func (s *Service) backupRoute(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if store == nil {
 		writeError(w, 503, "备份服务不可用")
+		return
+	}
+	if r.URL.Path == "/admin/api/backups/schedule" {
+		if r.Method == http.MethodGet {
+			view, err := store.Schedule(r.Context())
+			if err != nil {
+				writeError(w, 503, "读取备份计划失败")
+				return
+			}
+			writeJSON(w, 200, view)
+			return
+		}
+		if r.Method == http.MethodPut {
+			var input struct {
+				Revision int64                    `json:"revision"`
+				Settings backups.ScheduleSettings `json:"settings"`
+			}
+			if err := decodeJSON(w, r, &input); err != nil {
+				writeError(w, 400, "备份计划格式无效")
+				return
+			}
+			view, err := store.SaveSchedule(r.Context(), input.Revision, input.Settings)
+			if errors.Is(err, controlstore.ErrConflict) {
+				writeError(w, 409, "备份计划已更新，请刷新重试")
+				return
+			}
+			if err != nil {
+				writeError(w, 400, "备份计划保存失败：请检查时间、时区和保留数量")
+				return
+			}
+			writeJSON(w, 200, view)
+			return
+		}
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, 405, "方法不支持")
 		return
 	}
 	if r.URL.Path == "/admin/api/backups/restore-status" && r.Method == http.MethodGet {

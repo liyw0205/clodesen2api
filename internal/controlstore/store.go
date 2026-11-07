@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 var ErrConflict = errors.New("control document revision conflict")
 var ErrMissing = errors.New("control document not found")
@@ -85,7 +85,13 @@ func (s *Store) initialize() error {
 		return err
 	}
 	if version == SchemaVersion {
-		return s.Verify(ctx)
+		var indexes int
+		if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('audit_key_created','audit_type_created','audit_status_created','audit_unfinished','audit_account_created')").Scan(&indexes); err != nil {
+			return err
+		}
+		if indexes == 5 {
+			return s.Verify(ctx)
+		}
 	}
 	if version > 0 {
 		dir := filepath.Join(filepath.Dir(s.path), "pre-migration")
@@ -122,8 +128,17 @@ func (s *Store) initialize() error {
 		`CREATE TABLE IF NOT EXISTS audit_totals (model TEXT PRIMARY KEY, requests INTEGER NOT NULL, successes INTEGER NOT NULL, failures INTEGER NOT NULL, latency_ms INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS audit_receipts (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS audit_receipt_created ON audit_receipts(created_at)`,
+		`CREATE INDEX IF NOT EXISTS audit_key_created ON audit_requests(COALESCE(json_extract(CAST(payload AS TEXT),'$.apiKeyId'),''),created_at DESC,id DESC)`,
+		`CREATE INDEX IF NOT EXISTS audit_type_created ON audit_requests(COALESCE(json_extract(CAST(payload AS TEXT),'$.type'),''),created_at DESC,id DESC)`,
+		`CREATE INDEX IF NOT EXISTS audit_status_created ON audit_requests(` + auditCategory + `,created_at DESC,id DESC)`,
+		`CREATE INDEX IF NOT EXISTS audit_unfinished ON audit_requests(created_at) WHERE finished=0`,
+		`CREATE INDEX IF NOT EXISTS audit_account_created ON audit_requests(` + auditAccount + `,created_at)`,
 		`INSERT OR IGNORE INTO audit_receipts(id,created_at) SELECT id,created_at FROM audit_requests WHERE finished=1`,
-		`PRAGMA user_version=2`,
+		`CREATE TABLE IF NOT EXISTS audit_reports (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, model TEXT NOT NULL, account TEXT NOT NULL, key_id TEXT NOT NULL, success INTEGER NOT NULL, duration_ms INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS report_created ON audit_reports(created_at)`,
+		`CREATE TABLE IF NOT EXISTS report_meta (id INTEGER PRIMARY KEY CHECK(id=1), since INTEGER NOT NULL)`,
+		`INSERT OR IGNORE INTO report_meta(id,since) VALUES(1,CAST(strftime('%s','now') AS INTEGER)*1000000000)`,
+		`PRAGMA user_version=3`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
@@ -134,6 +149,8 @@ func (s *Store) initialize() error {
 
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Path() string { return s.path }
+
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *Store) Verify(ctx context.Context) error {
 	var integrity string
@@ -147,7 +164,7 @@ func (s *Store) Verify(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version != SchemaVersion {
+	if version != SchemaVersion && version != 2 {
 		return fmt.Errorf("unsupported control schema %d", version)
 	}
 	for _, query := range []string{
@@ -161,6 +178,15 @@ func (s *Store) Verify(ctx context.Context) error {
 			return fmt.Errorf("incomplete control schema: %w", err)
 		}
 		rows.Close()
+	}
+	if version >= 3 {
+		for _, query := range []string{"SELECT id,created_at,model,account,key_id,success,duration_ms FROM audit_reports LIMIT 0", "SELECT id,since FROM report_meta LIMIT 0"} {
+			rows, err := s.db.QueryContext(ctx, query)
+			if err != nil {
+				return fmt.Errorf("incomplete reporting schema: %w", err)
+			}
+			rows.Close()
+		}
 	}
 	var invalid int
 	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM documents WHERE NOT json_valid(payload)").Scan(&invalid); err != nil {
@@ -441,6 +467,11 @@ func writeAudit(ctx context.Context, tx *sql.Conn, events []AuditEvent, aggregat
 		if _, err := tx.ExecContext(ctx, `INSERT INTO audit_requests(id,created_at,finished,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET finished=excluded.finished,payload=excluded.payload`, event.ID, event.CreatedAt.UnixNano(), event.Finished, payload); err != nil {
 			return err
 		}
+		if event.Finished {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO audit_reports SELECT id,created_at,COALESCE(json_extract(CAST(payload AS TEXT),'$.model'),''),COALESCE(NULLIF(json_extract(CAST(payload AS TEXT),'$.accountId'),''),json_extract(CAST(payload AS TEXT),'$.account'),''),COALESCE(json_extract(CAST(payload AS TEXT),'$.apiKeyId'),''),COALESCE(json_extract(CAST(payload AS TEXT),'$.success'),0),COALESCE(json_extract(CAST(payload AS TEXT),'$.durationMs'),0) FROM audit_requests WHERE id=?`, event.ID); err != nil {
+				return err
+			}
+		}
 	}
 	if aggregate != nil {
 		payload, err := json.Marshal(aggregate)
@@ -455,6 +486,12 @@ func writeAudit(ctx context.Context, tx *sql.Conn, events []AuditEvent, aggregat
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM audit_receipts WHERE created_at < ?", cutoff.UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM audit_reports WHERE created_at < ?", time.Now().Add(-31*24*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE report_meta SET since=MAX(since,?) WHERE id=1", time.Now().Add(-31*24*time.Hour).UnixNano()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM audit_requests WHERE id IN (SELECT id FROM audit_requests ORDER BY created_at DESC LIMIT -1 OFFSET 50000)"); err != nil {

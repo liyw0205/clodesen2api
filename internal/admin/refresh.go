@@ -9,6 +9,8 @@ import (
 	"clodesen2api/internal/upstream"
 )
 
+const upstreamCacheTTL = time.Hour
+
 type refreshCall struct {
 	done   chan struct{}
 	value  any
@@ -109,6 +111,24 @@ func (s *Service) refreshCreditUsage(ctx context.Context, force bool) ([]upstrea
 	}
 	return value.([]upstream.CreditUsageRecord), nil
 }
+
+func (s *Service) cacheTTL(resource string) time.Duration {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	if s.cfg == nil {
+		return upstreamCacheTTL
+	}
+	cache := s.cfg.PublicSettings().Cache
+	seconds := cache.AccountsSeconds
+	if resource == "models" {
+		seconds = cache.ModelsSeconds
+	}
+	if resource == "credits" {
+		seconds = cache.CreditsSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (s *Service) cacheStatus() map[string]any {
 	s.cacheMu.Lock()
 	times := map[string]time.Time{"models": s.modelCachedAt, "accounts": s.accountCachedAt, "credits": s.creditUsageCachedAt}
@@ -117,12 +137,13 @@ func (s *Service) cacheStatus() map[string]any {
 	defer s.refreshes.mu.Unlock()
 	result := map[string]any{}
 	for key, cachedAt := range times {
+		ttl := s.cacheTTL(key)
 		age := 0.
 		state := "empty"
 		if !cachedAt.IsZero() {
 			age = time.Since(cachedAt).Seconds()
 			state = "hit"
-			if age > upstreamCacheTTL.Seconds() {
+			if age >= ttl.Seconds() {
 				state = "stale"
 			}
 		}
@@ -137,7 +158,7 @@ func (s *Service) cacheStatus() map[string]any {
 		if len(partial) > 0 && lastError == "" {
 			state = "partial"
 		}
-		result[key] = map[string]any{"cacheState": state, "cachedAt": cachedAt, "age": age, "refreshing": s.refreshes.calls[key] != nil, "lastError": lastError, "partialFailures": partial}
+		result[key] = map[string]any{"cacheState": state, "cachedAt": cachedAt, "age": age, "ttlSeconds": ttl.Seconds(), "refreshing": s.refreshes.calls[key] != nil, "lastError": lastError, "partialFailures": partial}
 	}
 	return result
 }

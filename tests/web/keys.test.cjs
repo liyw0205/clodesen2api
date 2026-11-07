@@ -8,6 +8,749 @@ const { chromium } = require("playwright-core");
 let fixture, browser, base;
 const failures = [];
 
+async function selectView(page, tab) {
+  const toggle = page.locator("#sidebar-toggle");
+  if (await toggle.isVisible()) await toggle.click();
+  await page.locator("#" + tab).click();
+}
+
+test("sidebar adapts across screens and supports dismissal, keyboard focus and session cleanup", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  try {
+    await page.goto(base + "/admin/");
+    await page.locator("#admin-token").fill("test-admin-123");
+    await page.locator("#login-submit").click();
+    await page.locator("#dashboard").waitFor({ state: "visible" });
+    const sidebar = page.locator("#workspace-sidebar"), toggle = page.locator("#sidebar-toggle");
+    mkdirSync("test-results", { recursive: true });
+    for (const width of [1440, 1024, 901]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await toggle.isVisible(), false);
+      assert.equal(await sidebar.isVisible(), true);
+      const bounds = await sidebar.boundingBox();
+      assert.equal(bounds.x, 0); assert.equal(bounds.width, 248);
+      assert.equal(await page.locator(".app-column").evaluate(node => node.getBoundingClientRect().left), 248);
+      await page.evaluate(() => window.scrollTo(0, 400));
+      assert.ok(Math.abs((await sidebar.boundingBox()).y) <= 1, "desktop navigation stays in view");
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await page.screenshot({ path: "test-results/sidebar-desktop-" + width + ".png" });
+    }
+    for (const width of [900, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      assert.equal(await sidebar.isVisible(), false);
+      assert.equal(await toggle.isVisible(), true);
+      assert.equal(await page.locator(".app-column").evaluate(node => node.getBoundingClientRect().left), 0);
+      await toggle.click();
+      await page.waitForFunction(() => document.querySelector("#workspace-sidebar").getBoundingClientRect().left === 0);
+      assert.equal(await sidebar.getAttribute("aria-modal"), "true");
+      assert.equal(await page.locator("#accounts-tab").evaluate(node => node === document.activeElement), true);
+      assert.equal(await page.locator(".app-column").evaluate(node => node.inert), true);
+      await page.keyboard.press("Tab");
+      assert.equal(await page.locator(".sidebar-brand").evaluate(node => node === document.activeElement), true);
+      await page.keyboard.press("Shift+Tab");
+      assert.equal(await page.locator("#accounts-tab").evaluate(node => node === document.activeElement), true);
+      const bounds = await sidebar.boundingBox();
+      assert.ok(bounds.width <= width - 48); assert.equal(bounds.height, 844);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await page.screenshot({ path: "test-results/sidebar-mobile-open-" + width + ".png" });
+      await page.keyboard.press("Escape");
+      assert.equal(await sidebar.isVisible(), false);
+      assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+      assert.equal(await page.locator(".app-column").evaluate(node => node.inert), false);
+      await page.screenshot({ path: "test-results/sidebar-mobile-closed-" + width + ".png" });
+      await toggle.click();
+      await page.locator("#sidebar-backdrop").click({ position: { x: width - 12, y: 100 } });
+      assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+      await toggle.click(); await page.locator("#sidebar-close").click();
+      assert.equal(await sidebar.isVisible(), false);
+      // Test the topbar controls geometrically, including their text at 320px.
+      const overflow = await page.locator(".topbar").evaluate(node => {
+        const controls = [...node.querySelectorAll("button, #service-state, .topbar-context > div")].filter(item => item.getBoundingClientRect().width);
+        return controls.some((item, index) => {
+          const rect = item.getBoundingClientRect();
+          return rect.left < 0 || rect.right > innerWidth || item.scrollWidth > item.clientWidth || controls.slice(index + 1).some(other => {
+            const next = other.getBoundingClientRect();
+            return rect.left < next.right && rect.right > next.left && rect.top < next.bottom && rect.bottom > next.top;
+          });
+        });
+      });
+      assert.equal(overflow, false, "topbar controls fit at " + width);
+    }
+    await page.evaluate(() => { document.querySelector("#update-source-disclosure").open = true; });
+    await toggle.focus(); await page.keyboard.press("Enter"); await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#update-source-disclosure").evaluate(node => node.open), true, "drawer Escape does not dismiss a background disclosure");
+    assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+    await page.evaluate(() => { document.querySelector("#update-source-disclosure").open = false; });
+    await toggle.click();
+    await page.keyboard.press("End");
+    assert.equal(await page.locator("#settings-tab").getAttribute("aria-selected"), "true");
+    await page.keyboard.press("Home"); await page.keyboard.press("ArrowDown");
+    assert.equal(await page.locator("#models-tab").evaluate(node => node === document.activeElement), true);
+    await page.keyboard.press("ArrowUp"); await page.keyboard.press("End"); await page.keyboard.press("Enter");
+    assert.equal(await sidebar.isVisible(), false);
+    assert.equal(await page.locator("#settings-view").isVisible(), true);
+    assert.equal(await page.locator("#current-view-label").textContent(), "系统设置");
+    await page.reload(); await page.locator("#dashboard").waitFor({ state: "visible" });
+    assert.equal(await sidebar.isVisible(), false); assert.equal(await page.locator("#settings-view").isVisible(), true);
+    await toggle.click(); await page.goBack();
+    assert.equal(await sidebar.isVisible(), false);
+    await toggle.click(); await page.setViewportSize({ width: 1024, height: 844 });
+    assert.equal(await sidebar.isVisible(), true); assert.equal(await sidebar.getAttribute("aria-modal"), null);
+    assert.equal(await page.locator(".app-column").evaluate(node => node.inert), false);
+    await page.setViewportSize({ width: 568, height: 320 });
+    assert.equal(await sidebar.isVisible(), false);
+    await page.waitForFunction(() => document.querySelector("#sidebar-toggle") === document.activeElement);
+    const scroll = await page.evaluate(() => { window.scrollTo(0, 200); return scrollY; });
+    await toggle.click();
+    await page.locator(".sidebar-footer").scrollIntoViewIfNeeded();
+    const footer = await page.locator(".sidebar-footer").boundingBox();
+    assert.ok(footer.y >= 0 && footer.y + footer.height <= 321, "short-screen navigation can scroll to its footer");
+    await page.screenshot({ path: "test-results/sidebar-short-screen.png" });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.keyboard.press("Escape"); await toggle.click();
+    const selected = await page.locator('.main-tab[aria-selected="true"]').boundingBox();
+    assert.ok(selected.y >= 0 && selected.y + selected.height <= 320, "reopening a short drawer reveals the selected view");
+    assert.equal(await page.evaluate(() => scrollY), scroll, "opening the drawer preserves the page scroll position");
+    assert.ok(await sidebar.evaluate(node => parseFloat(getComputedStyle(node).transitionDuration) <= 0.01));
+    // Session invalidation may arrive while the background is inert.
+    await page.evaluate(() => document.querySelector("#logout-button").click());
+    await page.locator("#login-panel").waitFor({ state: "visible" });
+    assert.equal(await page.locator(".app-column").evaluate(node => node.inert), false);
+    assert.equal(await page.locator("body").evaluate(node => getComputedStyle(node).overflow), "visible");
+    assert.equal(await page.locator("#admin-token").evaluate(node => node === document.activeElement), true);
+    await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.locator("#dashboard").waitFor({ state: "visible" });
+    assert.equal(await sidebar.isVisible(), false);
+    assert.deepEqual(failures, []);
+  } finally { await context.close(); }
+});
+
+test("settings conflicts preserve local edits and reload concurrent changes before explicit save", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  let baseline;
+  try {
+    await page.goto(base + "/admin/?view=settings");
+    await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelector("#settings-cache-accountsSeconds").value !== "");
+    baseline = await (await context.request.get(base + "/admin/api/config")).json();
+    const ttl = baseline.cache.accountsSeconds + 30;
+    await page.locator("#settings-cache-accountsSeconds").fill(String(ttl));
+    await page.locator("#settings-server-addr").fill("127.0.0.1:7791");
+    const foreign = structuredClone(baseline);
+    foreign.auth.rpm = 17; foreign.upstream.userAgent = "concurrent-editor";
+    assert.equal((await context.request.put(base + "/admin/api/config", { data: foreign })).status(), 200);
+    await page.locator("#settings-save").click();
+    await page.waitForFunction(() => document.querySelector("#settings-error").textContent.includes("保留") && !document.querySelector("#settings-save").disabled);
+    assert.equal(await page.locator("#settings-cache-accountsSeconds").inputValue(), String(ttl));
+    assert.equal(await page.locator("#settings-server-addr").inputValue(), "127.0.0.1:7791");
+    assert.equal(await page.locator("#settings-account-rpm").inputValue(), "17");
+    assert.equal(await page.locator("#settings-user-agent").inputValue(), "concurrent-editor");
+    assert.match(await page.locator("#settings-preview").textContent(), /待保存 2 项/);
+    assert.equal((await (await context.request.get(base + "/admin/api/config")).json()).cache.accountsSeconds, baseline.cache.accountsSeconds);
+    await page.locator("#settings-save").click();
+    await page.waitForFunction(() => document.querySelector("#settings-preview").hidden && !document.querySelector("#settings-save").disabled);
+    const saved = await (await context.request.get(base + "/admin/api/config")).json();
+    assert.equal(saved.cache.accountsSeconds, ttl); assert.equal(saved.auth.rpm, 17); assert.equal(saved.upstream.userAgent, "concurrent-editor");
+  } finally {
+    if (baseline) {
+      const current = await (await context.request.get(base + "/admin/api/config")).json();
+      assert.equal((await context.request.put(base + "/admin/api/config", { data: { ...baseline, revision: current.revision } })).status(), 200);
+    }
+    await context.close();
+  }
+});
+
+test("audit details clear on close and logout and late records cannot refill the session", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  const result = { records: [
+    { requestId: "image-audit", type: "image", prompt: "private audit prompt", model: "fixture-image", stage: "completed", success: true },
+    { requestId: "error-audit", type: "non_stream", model: "fixture-model", stage: "completed", statusCategory: "upstream_error", error: "private upstream error", status: 503 },
+  ], summary: { total: 2, successes: 1, failures: 1 }, availableAccounts: [], total: 2, page: 1, totalPages: 1 };
+  let delay = false, release, entered;
+  const pending = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.route("**/admin/api/request-records?**", async route => {
+    if (delay) { entered(); await pending; }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(result) }).catch(() => {});
+  });
+  try {
+    await page.goto(base + "/admin/?view=records&account=retired-account");
+    await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelectorAll("#request-record-rows tr").length === 2);
+    assert.equal(await page.locator("#request-filter-account").inputValue(), "retired-account");
+    await page.locator("#request-record-rows").getByRole("button", { name: "查看提示词", exact: true }).click();
+    assert.equal(await page.locator("#request-prompt-text").textContent(), "private audit prompt");
+    await page.locator("#prompt-dialog button[aria-label=关闭]").click();
+    assert.equal(await page.locator("#request-prompt-text").textContent(), "");
+    await page.locator("#request-record-rows").getByRole("button", { name: "查看提示词", exact: true }).click();
+    await page.keyboard.press("Escape"); assert.equal(await page.locator("#request-prompt-text").textContent(), "");
+    await page.locator("#request-record-rows").getByRole("button", { name: "查看报错", exact: true }).click();
+    assert.equal(await page.locator("#request-error-text").textContent(), "private upstream error");
+    await page.locator("#request-error-dialog button[aria-label=关闭]").click();
+    assert.equal(await page.locator("#request-error-text").textContent(), "");
+    delay = true;
+    await page.locator("#records-refresh").click(); await started;
+    await page.locator("#request-record-rows").getByRole("button", { name: "查看提示词", exact: true }).click();
+    await page.evaluate(() => document.querySelector("#logout-button").click());
+    await page.locator("#login-panel").waitFor({ state: "visible" }); release();
+    assert.equal(await page.locator("#request-prompt-text").textContent(), "");
+    assert.equal(await page.locator("#request-error-text").textContent(), "");
+    assert.equal(await page.locator("#request-record-total").textContent(), "--");
+    assert.equal(await page.locator("#request-record-rows tr").count(), 0);
+    delay = false;
+    await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelectorAll("#request-record-rows tr").length === 2);
+    assert.equal(await page.locator("#records-refresh").isEnabled(), true);
+  } finally { release(); await context.close(); }
+});
+
+test("reports expose upgrade coverage, dimensions, CSV and preserve rows on failure", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); const page = await context.newPage(); let created;
+  page.on("pageerror", error => failures.push(error.message));
+  try {
+    await page.goto(base + "/admin/?view=analytics"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelector("#model-count").textContent !== "等待加载");
+    created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "report-fixture" } })).json(); assert.ok(created.key?.id, JSON.stringify(created));
+    for (let i = 0; i < 3; i++) assert.equal((await context.request.post(base + "/v1/chat/completions", { headers: { Authorization: "Bearer " + created.secret }, data: { model: "allowed-model", messages: [{ role: "user", content: "report fixture" }] } })).status(), 200);
+    await page.locator("#report-dimension").selectOption("key"); await page.locator("#report-range").selectOption("30d");
+    await page.waitForFunction(id => document.querySelector("#report-rows").textContent.includes(id), created.key.id);
+    assert.match(await page.locator("#report-coverage").textContent(), /历史不完整/);
+    const report = await (await context.request.get(base + "/admin/api/reports?range=30d&dimension=key")).json(); const row = report.rows.find(item => item.name === created.key.id);
+    assert.equal(row.requests, 3); assert.equal(row.successRate, 100); assert.ok(row.p95Ms >= row.averageMs); assert.equal(report.retentionDays, 31); assert.equal(report.recordLimit, 0);
+    const downloadPromise = page.waitForEvent("download"); await page.locator("#report-export").click(); assert.equal((await downloadPromise).suggestedFilename(), "request-report.csv");
+    const csv = await context.request.get(base + "/admin/api/reports?range=30d&dimension=key&format=csv"); assert.match(csv.headers()["content-type"], /text\/csv/); assert.match(await csv.text(), new RegExp(created.key.id));
+    await page.route("**/admin/api/reports?**", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "report unavailable" }) })); await page.locator("#report-refresh").click();
+    await page.waitForFunction(() => document.querySelector("#report-error").textContent.includes("report unavailable")); assert.match(await page.locator("#report-rows").textContent(), new RegExp(created.key.id));
+    await page.unroute("**/admin/api/reports?**"); await page.locator("#report-refresh").click(); await page.waitForFunction(() => document.querySelector("#report-error").textContent === "" && !document.querySelector("#report-refresh").disabled);
+    for (const width of [1440, 768, 390, 320]) { await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false); assert.equal(await page.locator("#report-rows tr").first().isVisible(), true); await page.screenshot({ path: "test-results/reports-" + width + ".png", fullPage: true }); }
+    await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version); created = null;
+    await page.locator("#logout-button").click(); await page.locator("#login-panel").waitFor({ state: "visible" }); assert.equal(await page.locator("#report-rows").textContent(), "");
+  } finally { if (created?.key?.id && created?.key?.version) await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version).catch(() => {}); await context.close(); }
+});
+
+test("routing and update source panels stay inside the viewport and preserve selection", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  let savedSource = { source: "direct", customPrefix: "" };
+  const sources = [{ id: "direct", name: "直连" }, ...Array.from({ length: 10 }, (_, i) => ({ id: "source-" + i, name: "加速源 " + (i + 1) })), { id: "custom", name: "自定义" }];
+  await page.route("**/admin/api/update", route => {
+    if (route.request().method() === "PUT") savedSource = route.request().postDataJSON();
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", availableSources: sources, sourceID: savedSource.source, ok: true, latencyMs: 12 }) });
+  });
+  await page.route("**/admin/api/config", async route => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch(), settings = await response.json();
+    settings.update = savedSource;
+    return route.fulfill({ response, json: settings });
+  });
+  const fits = async selector => {
+    await page.waitForFunction(selector => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return rect.width > 0 && rect.left >= 11 && rect.top >= 11 && rect.right <= innerWidth - 11 && rect.bottom <= innerHeight - 11;
+    }, selector);
+  };
+  try {
+    await page.goto(base + "/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelector("#account-rows").textContent.includes("fixture@example.test"));
+    assert.equal(await page.locator("#routing-strategy").evaluate(node => node.tagName), "SUMMARY");
+    assert.deepEqual(await page.locator("#routing-panel input").evaluateAll(nodes => nodes.map(node => node.value)), ["fixed", "round_robin", "random"]);
+    for (const strategy of ["round_robin", "random", "fixed"]) {
+      await page.locator("#routing-strategy").click();
+      await page.locator('#routing-panel input[value="' + strategy + '"]').check();
+      await page.waitForFunction(() => document.querySelector("#routing-strategy").getAttribute("aria-disabled") === "false");
+      assert.equal((await (await context.request.get(base + "/admin/api/settings")).json()).strategy, strategy);
+      await page.reload();
+      await page.waitForFunction(strategy => document.querySelector('#routing-panel input[value="' + strategy + '"]')?.checked, strategy);
+    }
+    for (const strategy of ["weighted", "least_inflight", "latency"]) assert.equal((await context.request.put(base + "/admin/api/settings", { data: { strategy } })).status(), 400);
+    assert.equal((await context.request.patch(base + "/admin/api/accounts/fixture", { data: { weight: 37 } })).status(), 400);
+    const accounts = await (await context.request.get(base + "/admin/api/accounts")).json();
+    assert.equal("weight" in accounts.accounts[0], false);
+    await page.locator("#account-cards [data-action=edit]").first().click();
+    assert.equal(await page.locator("#account-weight").count(), 0); await page.keyboard.press("Escape");
+    await page.route("**/admin/api/settings", route => route.request().method() === "PUT" ? route.fulfill({ status: 500, json: { error: "routing save failed" } }) : route.continue());
+    await page.locator("#routing-strategy").click(); await page.locator('#routing-panel input[value="random"]').check();
+    await page.waitForFunction(() => document.querySelector("#routing-strategy").getAttribute("aria-disabled") === "false");
+    assert.equal(await page.locator('#routing-panel input[value="fixed"]').isChecked(), true);
+    await page.unroute("**/admin/api/settings");
+    mkdirSync("test-results", { recursive: true });
+    for (const viewport of [{ width: 1440, height: 844 }, { width: 768, height: 844 }, { width: 390, height: 844 }, { width: 320, height: 568 }, { width: 568, height: 320 }]) {
+      await page.setViewportSize(viewport);
+      await page.locator("#routing-disclosure").evaluate(node => { node.style.cssText = "position:fixed;right:12px;bottom:12px"; });
+      await page.locator("#routing-strategy").click(); await fits("#routing-panel");
+      await page.screenshot({ path: "test-results/routing-panel-" + viewport.width + ".png" });
+      await page.keyboard.press("Escape");
+      assert.equal(await page.locator("#routing-strategy").evaluate(node => node === document.activeElement), true);
+      await page.locator("#routing-strategy").focus(); await page.keyboard.press("ArrowDown"); await fits("#routing-panel");
+      assert.equal(await page.locator("#routing-panel input:checked").evaluate(node => node === document.activeElement), true);
+      await page.keyboard.press("Escape");
+    }
+    await page.locator("#routing-disclosure").evaluate(node => { node.removeAttribute("style"); });
+    await selectView(page, "settings-tab");
+    await page.locator("#settings-group-update").click();
+    await page.waitForFunction(() => document.querySelectorAll("#update-source-options input").length === 12);
+    assert.equal(await page.locator("#settings-strategy option").count(), 3);
+    await page.locator("#update-source-disclosure summary").click(); await fits("#update-source-panel");
+    await page.evaluate(() => window.scrollBy(0, 80)); await fits("#update-source-panel");
+    await page.keyboard.press("Escape");
+    for (const viewport of [{ width: 1440, height: 844 }, { width: 768, height: 844 }, { width: 390, height: 844 }, { width: 320, height: 568 }, { width: 568, height: 320 }]) {
+      await page.setViewportSize(viewport);
+      await page.locator("#update-source-disclosure").evaluate(node => { node.style.cssText = "position:fixed;right:12px;bottom:12px"; });
+      await page.locator("#update-source-disclosure summary").click(); await fits("#update-source-panel");
+      assert.equal(await page.locator(".update-source-body").evaluate(node => node.scrollHeight > node.clientHeight), true);
+      await page.locator('#update-source-options input[value="custom"]').check();
+      await fits("#update-source-panel");
+      const inputBounds = await page.locator("#update-custom-prefix").boundingBox();
+      await page.screenshot({ path: "test-results/update-source-panel-" + viewport.width + ".png" });
+      assert.ok(inputBounds.y >= 12 && inputBounds.y + inputBounds.height <= viewport.height - 12, JSON.stringify({ viewport, inputBounds }));
+      await page.locator("#update-custom-prefix").fill("https://mirror.example.test/");
+      await page.screenshot({ path: "test-results/update-source-panel-" + viewport.width + ".png" });
+      await page.locator("#update-source-save").click();
+      await page.waitForFunction(() => !document.querySelector("#update-source-disclosure").open);
+      assert.equal(savedSource.source, "custom");
+      assert.equal(savedSource.customPrefix, "https://mirror.example.test/");
+      await page.locator("#update-source-disclosure summary").click(); await fits("#update-source-panel");
+      await page.setViewportSize({ width: viewport.width, height: viewport.height - 80 }); await fits("#update-source-panel");
+      await page.locator("#service-state").click();
+      assert.equal(await page.locator("#update-source-disclosure").evaluate(node => node.open), false);
+    }
+    await page.locator("#update-source-disclosure summary").click();
+    await page.evaluate(() => document.querySelector("#logout-button").click());
+    await page.locator("#login-panel").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#update-source-disclosure").evaluate(node => node.open), false);
+    assert.equal(await page.locator("#routing-disclosure").evaluate(node => node.open), false);
+  } finally {
+    await context.request.put(base + "/admin/api/settings", { data: { strategy: "fixed" } }).catch(() => {});
+    await context.close();
+  }
+});
+
+test("default-off notification settings survive reload", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  let alertBaseline, testedChannel;
+  try {
+    await page.goto(base + "/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelector("#account-rows").textContent.includes("fixture@example.test"));
+    alertBaseline = await (await context.request.get(base + "/admin/api/alerts")).json();
+    await selectView(page, "settings-tab"); await page.locator("#settings-group-notifications").click(); await page.waitForFunction(() => document.querySelector("#alerts-status").textContent.includes("已关闭"));
+    assert.equal(await page.locator("#alerts-channel option").count(), 13);
+    for (const definition of alertBaseline.definitions) {
+      await page.locator("#alerts-channel").selectOption(definition.id);
+      assert.equal(await page.locator("#alerts-channel-title").textContent(), definition.name + " 配置");
+      assert.deepEqual(await page.locator("#alerts-channel-fields [data-field]").evaluateAll(nodes => nodes.map(node => node.dataset.field)), definition.fields.map(field => field.key));
+      assert.match(await page.locator("#alerts-enabled").locator("..").textContent(), new RegExp(definition.name));
+    }
+    await page.locator("#alerts-channel").selectOption("smtp"); assert.equal(await page.locator("#alerts-field-server").isVisible(), true); assert.equal(await page.locator("#alerts-field-password").getAttribute("type"), "password");
+    await page.locator("#alerts-channel").selectOption("bark"); assert.equal(await page.locator("#alerts-field-push").isVisible(), true);
+    await page.locator("#alerts-channel").selectOption("webhook");
+    await page.locator("#alerts-field-url").fill("http://127.0.0.1:1/notify"); await page.locator("#alerts-enabled").check();
+    await page.locator("#alerts-channel").selectOption("ntfy"); assert.equal(await page.locator("#alerts-field-topic").isVisible(), true);
+    await page.locator("#alerts-field-url").fill("http://127.0.0.1:1"); await page.locator("#alerts-field-topic").fill("browser-test"); await page.locator("#alerts-enabled").check();
+    await page.locator("#alerts-threshold").fill("321"); await page.getByRole("button", { name: "保存通知设置" }).click();
+    await page.waitForFunction(() => document.querySelector("#alerts-test-result").textContent === "通知设置已保存");
+    let savedAlerts = await (await context.request.get(base + "/admin/api/alerts")).json();
+    assert.equal(savedAlerts.settings.channels.webhook.enabled, true); assert.equal(savedAlerts.settings.channels.ntfy.enabled, true);
+    assert.equal(savedAlerts.configured.webhook.url, true); assert.equal("url" in savedAlerts.settings.channels.webhook.config, false);
+    await page.reload(); await page.locator("#settings-group-notifications").click(); await page.waitForFunction(() => document.querySelector("#alerts-threshold").value === "321"); assert.equal(await page.locator("#alerts-enabled").isChecked(), true);
+    await page.route("**/admin/api/alerts/test", async route => { testedChannel = route.request().postDataJSON(); await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "测试渠道可用" }) }); });
+    await page.getByRole("button", { name: "发送测试通知" }).click(); await page.waitForFunction(() => document.querySelector("#alerts-test-result").textContent === "测试渠道可用");
+    assert.equal(testedChannel.channel, "webhook"); assert.equal(testedChannel.config.url, "");
+    await page.locator("[data-clear=url]").check(); await page.locator("#alerts-enabled").uncheck(); await page.getByRole("button", { name: "保存通知设置" }).click();
+    await page.waitForFunction(() => document.querySelector("#alerts-test-result").textContent === "通知设置已保存");
+    savedAlerts = await (await context.request.get(base + "/admin/api/alerts")).json();
+    assert.equal(savedAlerts.configured.webhook.url, false); assert.equal(savedAlerts.settings.channels.webhook.enabled, false); assert.equal(savedAlerts.settings.channels.ntfy.enabled, true);
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 }); await page.evaluate(() => window.scrollTo(0, 0));
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      const overflow = await page.locator("#notifications-panel").evaluate(panel => [...panel.querySelectorAll("input, textarea, select, button")].some(node => {
+        const rect = node.getBoundingClientRect(); return rect.left < 0 || rect.right > innerWidth || node.tagName === "BUTTON" && node.scrollWidth > node.clientWidth;
+      }));
+      assert.equal(overflow, false, "notification controls fit at " + width);
+      await page.screenshot({ path: "test-results/notifications-" + width + ".png", fullPage: true });
+    }
+  } finally {
+    if (alertBaseline) {
+      const current = await (await context.request.get(base + "/admin/api/alerts")).json();
+      const channels = Object.fromEntries(Object.entries(current.settings.channels || {}).map(([id, item]) => [id, { enabled: false, config: item.config || {} }]));
+      const clearSecrets = Object.entries(current.configured || {}).flatMap(([id, fields]) => Object.entries(fields).filter(([, configured]) => configured).map(([key]) => id + "." + key));
+      await context.request.put(base + "/admin/api/alerts", { data: { revision: current.revision, settings: { lowBalance: alertBaseline.settings.lowBalance, channels }, clearSecrets } }).catch(() => {});
+    }
+    await context.close();
+  }
+});
+
+test("playground enforces consumption consent and handles text, SSE, image, failure and cancel", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage(); let created;
+  page.on("pageerror", error => failures.push(error.message));
+  try {
+    await page.goto(base + "/admin/?view=analytics"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.waitForFunction(() => document.querySelector("#model-count").textContent !== "等待加载");
+    created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "playground-fixture" } })).json(); assert.ok(created.key?.id, JSON.stringify(created));
+    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.locator("#playground-model").fill("allowed-model"); await page.locator("#playground-prompt").fill("fixture test");
+    await page.locator("#playground-send").click(); assert.equal(await page.locator("#playground-status").textContent(), "");
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-status").textContent.includes("已完成")); assert.match(await page.locator("#playground-output").textContent(), /fixture reply/);
+    await page.locator("#playground-stream").check(); await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-status").textContent.includes("已完成")); assert.equal(await page.locator("#playground-output").textContent(), "fixture stream");
+    await page.locator("#playground-mode").selectOption("image"); assert.equal(await page.locator("#playground-stream").isVisible(), false); await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-images img")?.naturalWidth > 0);
+    for (const width of [1440, 768, 390, 320]) { await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth || document.querySelector("#playground-dialog").scrollWidth > document.querySelector("#playground-dialog").clientWidth), false); await page.screenshot({ path: "test-results/playground-" + width + ".png", fullPage: true }); }
+    await page.locator("#playground-mode").selectOption("text"); await page.locator("#playground-stream").uncheck();
+    await page.route("**/v1/chat/completions", route => route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: { message: "fixture rate limit" } }) }));
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("fixture rate limit"));
+    await page.unroute("**/v1/chat/completions"); let release; const pending = new Promise(resolve => { release = resolve; });
+    await page.route("**/v1/chat/completions", async route => { await pending; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ choices: [{ message: { content: "late reply" } }] }) }).catch(() => {}); });
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.locator("#playground-cancel").click(); release(); await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("已取消")); assert.doesNotMatch(await page.locator("#playground-output").textContent(), /late reply/);
+    await page.locator("#playground-dialog button[aria-label=关闭]").click(); assert.equal(await page.locator("#playground-key").inputValue(), ""); assert.equal(await page.locator("#playground-prompt").inputValue(), "");
+    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.keyboard.press("Escape"); assert.equal(await page.locator("#playground-key").inputValue(), "");
+    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.evaluate(() => document.querySelector("#logout-button").click()); await page.locator("#login-panel").waitFor({ state: "visible" }); assert.equal(await page.locator("#playground-key").inputValue(), "");
+    await context.request.post(base + "/admin/api/session", { data: { token: "test-admin-123" } });
+    await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version); created = null;
+  } finally { if (created?.key?.id && created?.key?.version) await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version).catch(() => {}); await context.close(); }
+});
+
+test("settings groups preview restart impact and persist resource TTLs and backup schedule", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/?view=settings"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+  await page.waitForFunction(() => document.querySelector("#settings-cache-accountsSeconds").value !== "");
+  assert.equal(await page.locator("#operations-panel").isHidden(), true);
+  await page.locator("#settings-cache-accountsSeconds").fill("60");
+  await page.locator("#settings-cache-modelsSeconds").fill("7200");
+  await page.locator("#settings-cache-creditsSeconds").fill("900");
+  await page.locator("#settings-server-addr").fill("127.0.0.1:7789");
+  await page.waitForFunction(() => document.querySelector("#settings-preview").textContent.includes("待保存 4 项"));
+  const preview = await page.locator("#settings-preview").textContent(); assert.match(preview, /保存后生效/); assert.match(preview, /重启后生效/);
+  await page.locator("#settings-save").click();
+  await page.waitForFunction(() => document.querySelector("#settings-preview").hidden && !document.querySelector("#settings-pending").hidden);
+  const cache = await (await context.request.get(base + "/admin/api/cache-status")).json();
+  assert.equal(cache.accounts.ttlSeconds, 60); assert.equal(cache.models.ttlSeconds, 7200); assert.equal(cache.credits.ttlSeconds, 900);
+  await page.locator("#settings-group-storage").click();
+  await page.waitForFunction(() => document.querySelector("#backup-schedule-retain").value !== "");
+  await page.locator("#backup-schedule-enabled").check(); await page.locator("#backup-schedule-at").fill("03:15"); await page.locator("#backup-schedule-retain").fill("5");
+  await page.locator("#backup-schedule-form").getByRole("button", { name: "保存备份计划" }).click();
+  await page.waitForFunction(() => document.querySelector("#backup-schedule-status").textContent.includes("每日 03:15"));
+  await page.reload(); await page.locator("#settings-group-storage").click();
+  await page.waitForFunction(() => document.querySelector("#backup-schedule-enabled").checked);
+  assert.equal(await page.locator("#backup-schedule-retain").inputValue(), "5");
+  await page.locator("#backup-schedule-enabled").uncheck(); await page.locator("#backup-schedule-form").getByRole("button", { name: "保存备份计划" }).click();
+  await page.waitForFunction(() => document.querySelector("#backup-schedule-status").textContent.includes("已关闭"));
+  await page.locator("#settings-group-general").click();
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: "test-results/settings-groups-" + width + ".png", fullPage: true });
+  }
+  await context.close();
+});
+
+test("operations exposes local degradation, preserves prior status and clears on logout", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  let unavailable = false;
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.route("**/admin/api/system-status", route => route.fulfill({ status: unavailable ? 503 : 200, contentType: "application/json", body: JSON.stringify(unavailable ? { error: "database unavailable" } : { ready: true, database: true, admission: true, active: 2, jobsAvailable: true, queuedJobs: 3, runningJobs: 1, failedJobs: 4, audit: { degraded: true, queueLength: 2, dropped: 7, failures: 1 }, accounts: { total: 4, enabled: 3, available: 2, cooling: 1 }, startedAt: new Date().toISOString(), checkedAt: new Date().toISOString() }) }));
+  await page.goto(base + "/admin/?view=settings");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#settings-group-operations").click();
+  await page.waitForFunction(() => document.querySelector("#operations-fields").textContent.includes("存储降级"));
+  await page.waitForFunction(() => document.querySelector("#login-events").textContent.includes("登录成功"));
+  assert.match(await page.locator("#operations-fields").textContent(), /丢弃 7/);
+  assert.equal(await page.locator("#service-state span").textContent(), "部分功能异常");
+  unavailable = true;
+  await page.locator("#operations-refresh").click();
+  await page.waitForFunction(() => document.querySelector("#operations-error").textContent.includes("database unavailable"));
+  assert.match(await page.locator("#operations-fields").textContent(), /丢弃 7/);
+  unavailable = false;
+  await page.locator("#operations-refresh").click();
+  await page.waitForFunction(() => document.querySelector("#operations-error").textContent === "");
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: "test-results/operations-" + width + ".png", fullPage: true });
+  }
+  await page.locator("#logout-button").click();
+  await page.locator("#login-panel").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#operations-fields").textContent(), "");
+  assert.equal(await page.locator("#login-events").textContent(), "");
+  await context.close();
+});
+
+test("admin client enforces timeouts and cancellation and ignores late unauthorized replies", async () => {
+  const context = await browser.newContext(); const page = await context.newPage();
+  await page.goto(base + "/admin/");
+  const result = await page.evaluate(async () => {
+    const original = window.fetch;
+    let unauthorized = 0, settle;
+    const client = window.createAdminClient({ onUnauthorized: () => unauthorized++ });
+    window.fetch = (path, options) => new Promise((resolve, reject) => { options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }); });
+    const timeout = await client.request("/timeout", { timeout: 5 }).catch(error => error.name);
+    const controller = new AbortController();
+    const pending = client.request("/cancel", { signal: controller.signal }).catch(error => error.name); controller.abort();
+    const cancelled = await pending;
+    window.fetch = () => new Promise(resolve => { settle = resolve; });
+    const late = client.request("/late").catch(error => error.name); client.clear();
+    settle(new Response('{"error":"expired"}', { status: 401, headers: { "Content-Type": "application/json" } }));
+    const ignored = await late; window.fetch = original;
+    return { timeout, cancelled, ignored, unauthorized };
+  });
+  assert.deepEqual(result, { timeout: "TimeoutError", cancelled: "AbortError", ignored: "AbortError", unauthorized: 0 });
+  await context.close();
+});
+
+test("task center restores progress, cancels work and restricts unsafe retries", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  const now = new Date().toISOString();
+  let unavailable = false;
+  const jobs = [
+    { id: "job-active", kind: "probe", state: "running", items: [{ target: "fixture", state: "running" }], createdAt: now, updatedAt: now },
+    { id: "job-failed", kind: "refresh", state: "partial", items: [{ target: "fixture", state: "failed", error: "operation_failed" }], createdAt: now, updatedAt: now },
+    { id: "job-redeem", kind: "redeem", state: "interrupted", items: [{ target: "fixture", state: "interrupted", error: "result_unknown" }], createdAt: now, updatedAt: now },
+  ];
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.route("**/admin/api/jobs**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (unavailable) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "job storage unavailable" }) });
+    if (path.endsWith("/cancel")) { jobs[0] = { ...jobs[0], state: "cancelled", items: [{ target: "fixture", state: "cancelled" }] }; return route.fulfill({ status: 204 }); }
+    if (path.endsWith("/retry")) {
+      const job = { ...jobs[1], id: "job-retried", state: "queued", items: [{ target: "fixture", state: "queued" }] };
+      jobs.push(job);
+      return route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ job }) });
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs }) });
+  });
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#jobs-open").click();
+  await page.waitForFunction(() => document.querySelectorAll("#jobs-list .job-item").length === 3);
+  const active = page.locator("[data-job-id=job-active]");
+  await active.locator("summary").click();
+  await active.getByRole("button", { name: "取消任务", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("[data-job-id=job-active]").textContent.includes("已取消"));
+  const failed = page.locator("[data-job-id=job-failed]");
+  await failed.locator("summary").click();
+  await failed.getByRole("button", { name: "重试未完成项" }).click();
+  await page.locator("[data-job-id=job-retried]").waitFor();
+  assert.equal(await page.locator("[data-job-id=job-redeem] button").count(), 0);
+  await page.reload();
+  await page.locator("#jobs-open").click();
+  await page.locator("[data-job-id=job-retried]").waitFor();
+  await page.locator("#jobs-state").selectOption("active");
+  assert.equal(await page.locator("#jobs-list .job-item").count(), 1);
+  await page.locator("#jobs-state").selectOption("");
+  unavailable = true;
+  await page.locator("#jobs-refresh").click();
+  await page.waitForFunction(() => document.querySelector("#jobs-error").textContent.includes("读取失败"));
+  unavailable = false;
+  await page.locator("#jobs-refresh").click();
+  await page.waitForFunction(() => document.querySelector("#jobs-error").textContent === "");
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.equal(await page.locator("#jobs-dialog").evaluate(node => node.scrollWidth > node.clientWidth), false);
+    await page.screenshot({ path: "test-results/task-center-" + width + ".png", fullPage: true });
+  }
+  await context.close();
+});
+
+test("request diagnosis links model mapping, attempts and current cooldown", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  const key = await (await context.request.post(base + "/admin/api/keys", { data: { name: "diagnostic-test" } })).json();
+  const response = await context.request.post(base + "/v1/chat/completions", { headers: { Authorization: "Bearer " + key.secret }, data: { model: "allowed-model", messages: [{ role: "user", content: "hello" }] } });
+  assert.equal(response.status(), 200);
+  const requestId = response.headers()["x-request-id"];
+  await selectView(page, "records-tab");
+  await page.locator("#request-filter-key").fill(key.key.id);
+  await page.locator("#request-record-filters").getByRole("button", { name: "应用筛选" }).click();
+  await page.waitForFunction(() => document.querySelectorAll("#request-record-rows tr").length === 1);
+  await page.locator("#request-record-rows").getByRole("button", { name: "诊断请求 " + requestId, exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".diagnostic-cooldowns").textContent.includes("没有匹配"));
+  const diagnostic = await page.locator("#diagnostic-content").textContent();
+  assert.match(diagnostic, /上游尝试/);
+  assert.equal(diagnostic.includes(requestId), true);
+  assert.equal(diagnostic.includes("allowed-model"), true);
+  assert.equal(diagnostic.includes(key.secret), false);
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.equal(await page.locator("#diagnostic-dialog").evaluate(node => node.scrollWidth > node.clientWidth), false);
+    await page.screenshot({ path: "test-results/diagnostics-" + width + ".png", fullPage: true });
+  }
+  await page.locator("[data-close=diagnostic-dialog]").last().click();
+  assert.equal(await page.locator("#diagnostic-content").textContent(), "");
+  await context.request.delete(base + "/admin/api/keys/" + key.key.id + "?version=" + key.key.version);
+  await context.close();
+});
+
+test("analytics preserves successful modules and retries only the failed resource", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  let unavailable = true, modelReads = 0;
+  await page.route("**/admin/api/models**", route => { modelReads++; return route.continue(); });
+  await page.route("**/admin/api/credit-usage**", route => unavailable ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "credit service unavailable" }) }) : route.continue());
+  await page.goto(base + "/admin/?view=analytics");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#credit-usage-error").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelectorAll("#model-rows tr").length === 2 && document.querySelector("#usage-total").textContent !== "--");
+  assert.equal(await page.locator("#model-error").isHidden(), true);
+  const count = modelReads;
+  unavailable = false;
+  await page.locator("#credit-usage-error").getByRole("button", { name: "重试" }).click();
+  await page.locator("#credit-usage-error").waitFor({ state: "hidden" });
+  assert.equal(modelReads, count);
+  await page.route("**/admin/api/models**", route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "catalog unavailable" }) }));
+  await page.locator("#analytics-refresh").click();
+  await page.locator("#model-error").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#model-rows tr").count(), 2);
+  assert.match(await page.locator("#model-error + .resource-status").textContent(), /上次成功/);
+  await context.close();
+});
+
+test("URL restores request filters and pagination across reload and browser history", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  const created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "navigation-test" } })).json();
+  for (let i = 0; i < 23; i++) {
+    assert.equal((await context.request.post(base + "/v1/chat/completions", { headers: { Authorization: "Bearer " + created.secret }, data: { model: "allowed-model", messages: [] } })).status(), 200);
+  }
+  await selectView(page, "records-tab");
+  await page.locator("#request-filter-key").fill(created.key.id);
+  await page.locator("#request-filter-model").fill("allowed-model");
+  await page.locator("#request-record-filters").getByRole("button", { name: "应用筛选" }).click();
+  await page.waitForFunction(() => document.querySelector("#request-record-count").textContent.startsWith("23 条"));
+  await page.locator("#request-next-page").click();
+  await page.waitForFunction(() => document.querySelector("#request-page-label").textContent.includes("2 / 2"));
+  assert.equal(new URL(page.url()).searchParams.get("page"), "2");
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("#request-page-label").textContent.includes("2 / 2"));
+  assert.equal(await page.locator("#request-filter-key").inputValue(), created.key.id);
+  assert.equal(await page.locator("#request-filter-model").inputValue(), "allowed-model");
+  await selectView(page, "accounts-tab");
+  await page.goBack();
+  await page.locator("#records-view").waitFor({ state: "visible" });
+  assert.match(await page.locator("#request-page-label").textContent(), /2 \/ 2/);
+  await page.goForward();
+  await page.locator("#accounts-view").waitFor({ state: "visible" });
+  assert.equal(page.url().includes(created.secret), false);
+  await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version);
+  await context.close();
+});
+
+test("account filters, selection scope and atomic batch enable survive reload", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  const account = await (await context.request.post(base + "/admin/api/accounts", { data: { identifier: "batch-test@example.test", password: "fixture-password" } })).json();
+  try {
+    await context.request.patch(base + "/admin/api/accounts/" + account.id, { data: { enabled: false } });
+    await page.locator("#refresh-button").click();
+    await page.waitForFunction(() => document.querySelectorAll("#account-rows tr").length === 2);
+    await page.locator("#account-status").selectOption("disabled");
+    await page.locator("#account-search").fill("batch-test");
+    assert.equal(await page.locator("#account-rows tr").count(), 1);
+    await page.reload();
+    await page.waitForFunction(() => document.querySelectorAll("#account-rows tr").length === 1);
+    assert.equal(await page.locator("#account-status").inputValue(), "disabled");
+    assert.equal(await page.locator("#account-search").inputValue(), "batch-test");
+    assert.equal(await page.locator("#account-batch").isHidden(), true);
+    await page.locator("#select-all").check();
+    await page.locator("#account-batch-action").selectOption("enable");
+    await page.locator("#account-batch").getByRole("button", { name: "执行", exact: true }).click();
+    await page.locator("#account-filter-empty").waitFor({ state: "visible" });
+    assert.match(await page.locator("#account-selected-count").textContent(), /筛选外 1/);
+    await page.locator("#account-status").selectOption("all");
+    await page.locator("#account-batch-action").selectOption("checkin");
+    const submitted = page.waitForResponse(response => response.url().endsWith("/admin/api/jobs") && response.request().method() === "POST");
+    await page.locator("#account-batch").getByRole("button", { name: "执行", exact: true }).click();
+    const job = (await (await submitted).json()).job;
+    assert.deepEqual(job.items.map(item => item.target), [account.id]);
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "account filter overflow at " + width);
+      await page.screenshot({ path: "test-results/account-tools-" + width + ".png", fullPage: true });
+    }
+  } finally { await context.request.delete(base + "/admin/api/accounts/" + account.id); await context.close(); }
+});
+
+test("connection templates keep one-time secrets only until close or logout", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  await page.goto(base + "/admin/?view=keys");
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#keys-create").click();
+  await page.locator("#key-name").fill("connection-test");
+  await page.locator("#key-save").click();
+  await page.locator("#key-secret-dialog").waitFor({ state: "visible" });
+  const secret = await page.locator("#key-secret").inputValue();
+  const key = (await (await context.request.get(base + "/admin/api/keys")).json()).keys.find(item => item.name === "connection-test");
+  await page.locator("#key-connect").click();
+  await page.waitForFunction(() => document.querySelector("#connection-model").value === "allowed-model");
+  assert.equal(await page.locator("#key-secret").inputValue(), "");
+  assert.equal((await page.locator("#connection-output").inputValue()).includes(secret), true);
+  await page.locator("#connection-format").selectOption("python");
+  assert.match(await page.locator("#connection-output").inputValue(), /from openai import OpenAI/);
+  await page.locator("#connection-format").selectOption("client");
+  assert.deepEqual(JSON.parse(await page.locator("#connection-output").inputValue()), { base_url: base + "/v1", api_key: secret, model: "allowed-model" });
+  for (const width of [1440, 768, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: "test-results/connections-" + width + ".png", fullPage: true });
+  }
+  await page.locator("[data-close=connection-dialog]").last().click();
+  assert.equal(await page.locator("#connection-output").inputValue(), "");
+  await page.locator("#connections-open").click();
+  assert.equal((await page.locator("#connection-output").inputValue()).includes(secret), false);
+  await page.evaluate(async () => { await fetch("/admin/api/session", { method: "DELETE" }); });
+  await page.locator("#connection-dialog").getByRole("button", { name: "完成", exact: true }).click();
+  await page.locator("#keys-refresh").click();
+  await page.locator("#login-panel").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#connection-output").inputValue(), "");
+  assert.equal(page.url().includes(secret), false);
+  assert.deepEqual(await page.evaluate(() => [localStorage.length, sessionStorage.length]), [0, 0]);
+  await page.locator("#admin-token").fill("test-admin-123");
+  await page.locator("#login-submit").click();
+  await page.locator("#dashboard").waitFor({ state: "visible" });
+  await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
+  await context.close();
+});
+
 test("shared admission settings, request quota and background account actions", async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
@@ -17,7 +760,7 @@ test("shared admission settings, request quota and background account actions", 
   await page.locator("#admin-token").fill("test-admin-123");
   await page.locator("#login-submit").click();
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  await page.locator("#settings-tab").click();
+  await selectView(page, "settings-tab");
   await page.waitForFunction(() => document.querySelector("#admission-maxConcurrent").value !== "");
   await page.waitForFunction(() => document.querySelector("#settings-account-rpm").value !== "");
   await page.locator("#settings-account-rpm").fill("5");
@@ -31,11 +774,13 @@ test("shared admission settings, request quota and background account actions", 
   assert.equal(settings.redemption.code, "");
   const stale = await context.request.put(base + "/admin/api/config", { data: { ...settings, revision: settings.revision - 1 } });
   assert.equal(stale.status(), 409);
+  await page.locator("#settings-group-admission").click();
   await page.locator("#admission-maxConcurrent").fill("20");
   await page.getByRole("button", { name: "保存准入设置", exact: true }).click();
   await page.waitForFunction(() => document.querySelector("#admission-maxConcurrent").value === "20" && !document.querySelector("#admission-maxConcurrent").form.querySelector("button").disabled);
   const limits = await (await context.request.get(base + "/admin/api/admission")).json();
   assert.equal(limits.settings.maxConcurrent, 20);
+  await page.locator("#settings-group-storage").click();
   await page.getByRole("button", { name: "创建完整备份", exact: true }).click();
   await page.locator("#storage-panel a[download]").first().waitFor();
   const archive = await context.request.get(base + await page.locator("#storage-panel a[download]").first().getAttribute("href"));
@@ -53,7 +798,7 @@ test("shared admission settings, request quota and background account actions", 
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.locator("#keys-tab").click();
+  await selectView(page, "keys-tab");
   await page.locator("#keys-create").click();
   await page.locator("#key-name").fill("Quota browser key");
   await page.locator("#key-concurrent").fill("1");
@@ -69,7 +814,7 @@ test("shared admission settings, request quota and background account actions", 
   await page.waitForFunction(() => document.querySelector("#keys-rows").textContent.includes("日请求 1 / 1"));
   const key = (await (await context.request.get(base + "/admin/api/keys")).json()).keys.find(item => item.name === "Quota browser key");
   await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
-  await page.locator("#accounts-tab").click();
+  await selectView(page, "accounts-tab");
   const submitted = page.waitForResponse(response => response.url().endsWith("/admin/api/jobs") && response.request().method() === "POST");
   await page.locator("#checkin-all-button").click();
   const created = await (await submitted).json();
@@ -185,7 +930,8 @@ test("update waits for service restart before reloading", async () => {
   await page.locator("#admin-token").fill("test-admin-123");
   await page.locator("#login-submit").click();
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  await page.locator("#settings-tab").click();
+  await selectView(page, "settings-tab");
+  await page.locator("#settings-group-update").click();
   await page.locator("#update-install").waitFor({ state: "visible" });
   const startedAt = Date.now();
   const navigation = page.waitForEvent("framenavigated");
@@ -206,7 +952,7 @@ test("key lifecycle, policy, audit, conflict and responsive UI", async () => {
   await page.locator("#admin-token").fill("test-admin-123");
   await page.locator("#login-submit").click();
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  await page.locator("#keys-tab").click();
+  await selectView(page, "keys-tab");
   await page.locator("#keys-empty").waitFor({ state: "visible" });
   await page.locator("#keys-create").click();
   await page.locator("#key-name").fill("Browser client <script>");
@@ -266,7 +1012,7 @@ test("key lifecycle, policy, audit, conflict and responsive UI", async () => {
   assert.ok(audit.records.every(record => record.apiKeyId === id && record.clientIP && record.requestId));
   assert.ok(audit.records.some(record => record.authErrorCode === "rpm_exceeded"));
   assert.equal(JSON.stringify(audit).includes(secret), false);
-  await page.locator("#keys-tab").click();
+  await selectView(page, "keys-tab");
   await page.waitForFunction(() => !document.querySelector("#keys-refresh").disabled);
   mkdirSync("test-results", { recursive: true });
   for (const width of [1440, 768, 390, 320]) {
@@ -297,13 +1043,13 @@ test("key expiry, IP, clipboard failure, logout and late secret response", async
   const expired = await create({name:"Expired browser",expiresAt:"2000-01-01T00:00:00Z"});
   const ip = await create({name:"IP browser",ipAllow:["192.0.2.5"]});
   for (const [item,status] of [[expired,401],[ip,403]]) assert.equal((await context.request.get(base+"/v1/models",{headers:{Authorization:"Bearer "+item.secret}})).status(),status);
-  await page.locator("#keys-tab").click(); await page.locator("#keys-cards").getByText("Expired browser",{exact:true}).waitFor();
+  await selectView(page, "keys-tab"); await page.locator("#keys-cards").getByText("Expired browser",{exact:true}).waitFor();
   assert.ok((await page.locator("#keys-cards").textContent()).includes("已过期"));
   await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Clipboard browser"); await page.locator("#key-save").click(); await page.locator("#key-secret-dialog").waitFor({state:"visible"});
   await page.locator("#key-copy").click(); await page.locator("#key-copy-error").waitFor({state:"visible"});
   await page.evaluate(() => document.querySelector("#logout-button").click()); await page.locator("#login-panel").waitFor({state:"visible"});
   assert.equal(await page.locator("#key-secret").inputValue(),""); assert.equal(await page.locator("#key-secret-dialog").isVisible(),false);
-  await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"}); await page.locator("#keys-tab").click();
+  await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"}); await selectView(page, "keys-tab");
   let release, intercepted;
   const arrived = new Promise(resolve => { intercepted = resolve; }); const held = new Promise(resolve => { release = resolve; });
   await page.route("**/admin/api/keys",async route => { if(route.request().method() !== "POST") return route.continue(); intercepted(); await held; await route.fulfill({status:201,contentType:"application/json",body:JSON.stringify({secret:"sk-delayed-secret",key:{id:"delayed"}})}); });
@@ -322,11 +1068,11 @@ test("verified metering quota, unknown reservation and reconciliation UI", async
   await page.goto(base+"/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"});
   const policies = await (await context.request.get(base+"/admin/api/model-policies")).json(); const rule = policies.models.find(item=>item.sourceId==="allowed-model");
   const changed = await context.request.put(base+"/admin/api/model-policies/allowed-model",{data:{revision:policies.revision,rule:{...rule,metering:{source:"upstream-usage-v1",tokenUpperBound:80,creditUpperBound:10}}}}); assert.equal(changed.status(),200);
-  await page.locator("#keys-tab").click(); await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Meter browser"); await page.locator("#key-dailyTokens").fill("100"); await page.locator("#key-dailyCredits").fill("20"); await page.locator("#key-save").click(); await page.locator("#key-secret-dialog").waitFor({state:"visible"});
+  await selectView(page, "keys-tab"); await page.locator("#keys-create").click(); await page.locator("#key-name").fill("Meter browser"); await page.locator("#key-dailyTokens").fill("100"); await page.locator("#key-dailyCredits").fill("20"); await page.locator("#key-save").click(); await page.locator("#key-secret-dialog").waitFor({state:"visible"});
   const secret = await page.locator("#key-secret").inputValue(); await page.locator("[data-close='key-secret-dialog']").last().click();
   const infer = content=>context.request.post(base+"/v1/chat/completions",{headers:{Authorization:"Bearer "+secret},data:{model:"allowed-model",messages:[{role:"user",content}]}});
   assert.equal((await infer("fixture:metered")).status(),200); assert.equal((await infer("unknown" )).status(),200); assert.equal((await infer("fixture:metered")).status(),429);
-  await page.locator("#settings-tab").click(); await page.getByRole("button",{name:"确认对账",exact:true}).waitFor();
+  await selectView(page, "settings-tab"); await page.locator("#settings-group-admission").click(); await page.getByRole("button",{name:"确认对账",exact:true}).waitFor();
   const pending = page.locator(".metering-pending form").filter({has:page.getByRole("button",{name:"确认对账",exact:true})}).last();
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({width, height:844}); await pending.scrollIntoViewIfNeeded();
@@ -335,7 +1081,7 @@ test("verified metering quota, unknown reservation and reconciliation UI", async
   }
   await pending.locator("input").nth(0).fill("10"); await pending.locator("input").nth(1).fill("2"); await pending.getByRole("button",{name:"确认对账",exact:true}).click(); await page.getByRole("button",{name:"确认对账",exact:true}).waitFor({state:"hidden"});
   const view = await (await context.request.get(base+"/admin/api/admission")).json(); assert.ok(Object.values(view.reservations).every(item=>item.state==="settled"));
-  await page.setViewportSize({width:1440,height:1000}); await page.locator("#keys-tab").click(); await page.locator("#keys-refresh").click();
+  await page.setViewportSize({width:1440,height:1000}); await selectView(page, "keys-tab"); await page.locator("#keys-refresh").click();
   await page.waitForFunction(()=>document.querySelector("#keys-rows").textContent.includes("Meter browser"));
   const meterRow=page.locator("#keys-rows tr").filter({hasText:"Meter browser"});
   await meterRow.getByRole("button",{name:"编辑",exact:true}).click();
@@ -362,7 +1108,7 @@ test("model policies edit, alias filtering, disable and conflict", async () => {
   await page.locator("#admin-token").fill("test-admin-123");
   await page.locator("#login-submit").click();
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  await page.locator("#models-tab").click();
+  await selectView(page, "models-tab");
   await page.locator("#model-rows").getByRole("button", { name: "编辑策略" }).first().waitFor();
   const created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "model-policy-browser", models: ["allowed-model"] } })).json();
   const row = page.locator("#model-rows tr").filter({ hasText: "allowed-model" });
@@ -414,7 +1160,7 @@ test("model policies edit, alias filtering, disable and conflict", async () => {
   const cooldowns = await (await context.request.get(base + "/admin/api/model-cooldowns")).json();
   assert.ok(cooldowns.entries.some(item => item.accountId === "fixture" && item.model === "other-model" && item.reason === "upstream_429"));
   assert.equal((await context.request.post(base + "/v1/chat/completions", { headers: cooldownHeaders, data: { model: "allowed-model" } })).status(), 200);
-  await page.locator("#accounts-tab").click();
+  await selectView(page, "accounts-tab");
   await page.waitForFunction(() => document.querySelector("#account-rows").textContent.includes("other-model"));
   assert.match(await page.locator("#account-rows").textContent(), /上游限流.*恢复/);
   await context.request.delete(base + "/admin/api/keys/" + cooldownKey.key.id + "?version=" + cooldownKey.key.version);

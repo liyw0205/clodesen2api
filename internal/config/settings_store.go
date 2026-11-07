@@ -31,6 +31,7 @@ var settingNames = map[string]string{
 	"checkin": "checkin.enable", "checkin-path": "checkin.path", "checkin-at": "checkin.at", "checkin-tz": "checkin.timezone",
 	"auto-redeem": "redemption.enable", "auto-redeem-at": "redemption.at", "auto-redeem-code": "redemption.code",
 	"update-source": "update.source", "update-custom-prefix": "update.customPrefix",
+	"cache-accounts-seconds": "cache.accountsSeconds", "cache-models-seconds": "cache.modelsSeconds", "cache-credits-seconds": "cache.creditsSeconds",
 }
 
 func (c *Config) captureSources(fs *flag.FlagSet, args []string, lookup func(string) (string, bool)) error {
@@ -86,7 +87,7 @@ func (c *Config) captureSources(fs *flag.FlagSet, args []string, lookup func(str
 
 func hotSetting(path string) bool {
 	switch path {
-	case "auth.strategy", "auth.rpm", "checkin.enable", "checkin.at", "redemption.enable", "redemption.at", "redemption.code", "update.source", "update.customPrefix":
+	case "auth.strategy", "auth.rpm", "checkin.enable", "checkin.at", "redemption.enable", "redemption.at", "redemption.code", "update.source", "update.customPrefix", "cache.accountsSeconds", "cache.modelsSeconds", "cache.creditsSeconds":
 		return true
 	}
 	return false
@@ -111,7 +112,8 @@ func (s *SettingsStore) ImportLegacyStrategy(ctx context.Context, strategy strin
 	}
 	doc.LegacyStrategyImported = true
 	if _, exists := doc.Values["auth.strategy"]; !exists && s.base.sources["auth.strategy"] != "cli" && s.base.sources["auth.strategy"] != "environment" {
-		if strategy != "fixed" && strategy != "random" && strategy != "round_robin" {
+		strategy = StoredStrategy(strategy)
+		if strategy == "" {
 			return errors.New("invalid legacy strategy")
 		}
 		doc.Values["auth.strategy"], _ = json.Marshal(strategy)
@@ -134,6 +136,9 @@ type SettingsStore struct {
 // classified as hot are published to the service while it is running.
 func OpenSettings(ctx context.Context, db *controlstore.Store, cfg *Config) (*SettingsStore, error) {
 	s := &SettingsStore{db: db, base: *cfg, running: *cfg}
+	if strategy := StoredStrategy(s.base.Auth.Strategy); strategy != "" {
+		s.base.Auth.Strategy = strategy
+	}
 	doc := settingsDocument{Schema: 1, Values: map[string]json.RawMessage{}}
 	if _, err := db.Load(ctx, "settings", &doc); errors.Is(err, controlstore.ErrMissing) {
 		if err := db.Import(ctx, "settings", cfg.ConfigFilePath(), doc); err != nil {
@@ -191,6 +196,7 @@ func applyValues(base Config, values map[string]json.RawMessage) (Config, error)
 	if err := json.Unmarshal(raw, &public); err != nil {
 		return Config{}, err
 	}
+	public.Auth.Strategy = StoredStrategy(public.Auth.Strategy)
 	if err := base.ApplyPublicSettings(public); err != nil {
 		return Config{}, err
 	}
@@ -205,6 +211,14 @@ func (s *SettingsStore) snapshot(ctx context.Context) (Config, settingsDocument,
 	}
 	if doc.Schema != 1 || doc.Values == nil {
 		return Config{}, doc, 0, errors.New("invalid settings schema")
+	}
+	if raw := doc.Values["auth.strategy"]; len(raw) > 0 {
+		var previous string
+		if json.Unmarshal(raw, &previous) == nil {
+			if strategy := StoredStrategy(previous); strategy != "" && strategy != previous {
+				doc.Values["auth.strategy"], _ = json.Marshal(strategy)
+			}
+		}
 	}
 	values := map[string]json.RawMessage{}
 	for path, value := range doc.Values {

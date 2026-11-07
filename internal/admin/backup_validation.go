@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 
 	"clodesen2api/internal/admission"
+	"clodesen2api/internal/alerts"
 	"clodesen2api/internal/apikey"
+	"clodesen2api/internal/backups"
 	"clodesen2api/internal/config"
 	"clodesen2api/internal/controlstore"
 	"clodesen2api/internal/jobs"
@@ -23,6 +25,12 @@ func ValidateControlBackup(ctx context.Context, dir string, base config.Config) 
 		seen[name] = true
 		var err error
 		switch name {
+		case alerts.Document:
+			err = alerts.ValidateDocument(raw)
+		case backups.ScheduleDocument:
+			err = backups.ValidateScheduleDocument(raw)
+		case loginSecurityDocument:
+			_, err = decodeLoginState(raw)
 		case "api-keys":
 			err = apikey.ValidateDocument(raw)
 		case "model-policies":
@@ -52,7 +60,7 @@ func ValidateControlBackup(ctx context.Context, dir string, base config.Config) 
 		case "accounts":
 			var value accountFile
 			err = json.Unmarshal(raw, &value)
-			if err == nil && (value.Version != 1 || normalizeStrategy(value.Strategy) == "") {
+			if err == nil && (value.Version != 1 || config.StoredStrategy(value.Strategy) == "") {
 				err = errors.New("invalid account schema")
 			}
 			if err == nil {

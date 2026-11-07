@@ -167,12 +167,12 @@ func ConfiguredAccounts(cfg *config.Config) ([]AccountCredential, error) {
 func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upstream, error) {
 	immutable := *cfg
 	cfg = &immutable
-	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
-	if strategy == "" {
+	strategy := config.NormalizeStrategy(cfg.Auth.Strategy)
+	if strings.TrimSpace(cfg.Auth.Strategy) == "" {
 		strategy = "fixed"
 	}
-	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
-		return nil, fmt.Errorf("invalid auth.strategy %q (want round_robin, random, or fixed)", cfg.Auth.Strategy)
+	if strategy == "" {
+		return nil, fmt.Errorf("invalid auth.strategy %q", cfg.Auth.Strategy)
 	}
 	rpmLimit := configuredRPM(cfg.Auth.RPM)
 	if rpmLimit > 1000 {
@@ -228,8 +228,8 @@ func (u *Upstream) ApplyRuntimeConfig(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	strategy := strings.ToLower(strings.TrimSpace(cfg.Auth.Strategy))
-	if strategy == "round_robin" || strategy == "random" || strategy == "fixed" {
+	strategy := config.NormalizeStrategy(cfg.Auth.Strategy)
+	if strategy != "" {
 		u.poolMu.Lock()
 		u.strategy = strategy
 		u.rpmLimit = configuredRPM(cfg.Auth.RPM)
@@ -869,7 +869,6 @@ func (u *Upstream) selectAccounts() ([]accountCandidate, time.Duration) {
 	if len(candidates) == 0 {
 		return nil, earliest
 	}
-
 	if u.strategy == "random" {
 		order := mathrand.Perm(len(candidates))
 		shuffled := make([]accountCandidate, len(candidates))

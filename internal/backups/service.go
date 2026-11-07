@@ -43,6 +43,7 @@ type Record struct {
 	Size      int64     `json:"size"`
 	CreatedAt time.Time `json:"createdAt"`
 	Automatic bool      `json:"automatic"`
+	Warning   string    `json:"warning,omitempty"`
 }
 type Plan struct {
 	ID        string    `json:"id"`
@@ -104,6 +105,15 @@ func allowed(name string) bool {
 	return name == "control.sqlite3" || name == "config.toml" || name == "admin.token" || name == "credit-usage.json" || name == "redemption-history.json" || name == "admin-cache.json"
 }
 func (s *Service) Create(ctx context.Context, automatic bool) (Record, error) {
+	keep := 7
+	if automatic {
+		if view, err := s.Schedule(ctx); err == nil {
+			keep = view.Settings.Retain
+		}
+	}
+	return s.create(ctx, automatic, keep)
+}
+func (s *Service) create(ctx context.Context, automatic bool, keep int) (Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, err := randomID()
@@ -214,10 +224,13 @@ func (s *Service) Create(ctx context.Context, automatic bool) (Record, error) {
 		return Record{}, err
 	}
 	ok = true
+	warning := ""
 	if automatic {
-		s.pruneAutomatic(7)
+		if err := s.pruneAutomatic(keep); err != nil {
+			warning = "cleanup_failed"
+		}
 	}
-	return Record{ID: id, Size: info.Size(), CreatedAt: manifest.CreatedAt, Automatic: automatic}, nil
+	return Record{ID: id, Size: info.Size(), CreatedAt: manifest.CreatedAt, Automatic: automatic, Warning: warning}, nil
 }
 func validID(id string) bool {
 	if len(id) != 39 && len(id) != 37 {
@@ -268,10 +281,10 @@ func (s *Service) List() ([]Record, error) {
 	sort.Slice(records, func(i, j int) bool { return records[i].CreatedAt.After(records[j].CreatedAt) })
 	return records, nil
 }
-func (s *Service) pruneAutomatic(keep int) {
+func (s *Service) pruneAutomatic(keep int) error {
 	records, err := s.List()
 	if err != nil {
-		return
+		return err
 	}
 	for _, record := range records {
 		if !record.Automatic {
@@ -279,10 +292,16 @@ func (s *Service) pruneAutomatic(keep int) {
 		}
 		keep--
 		if keep < 0 {
-			path, _ := s.Path(record.ID)
-			_ = os.Remove(path)
+			path, err := s.Path(record.ID)
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 // Validate extracts only named regular files, enforcing both compressed and expanded limits.
@@ -360,7 +379,7 @@ func Validate(ctx context.Context, path, dir string) (Manifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return manifest, err
 	}
-	if manifest.Format != 1 || manifest.Schema != controlstore.SchemaVersion || manifest.Scope != "full" || len(manifest.Entries) != len(archive.File)-1 {
+	if manifest.Format != 1 || (manifest.Schema != controlstore.SchemaVersion && manifest.Schema != 2) || manifest.Scope != "full" || len(manifest.Entries) != len(archive.File)-1 {
 		return manifest, errors.New("unsupported or incomplete manifest")
 	}
 	listed := map[string]bool{}

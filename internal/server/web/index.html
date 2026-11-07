@@ -8,11 +8,31 @@
     <meta name="description" content="Clodesen 账号与积分管理控制台">
     <title>Clodesen 控制台</title>
     <link rel="stylesheet" href="/admin/app.css">
+    <script defer src="/admin/client.js"></script>
+    <script defer src="/admin/floating-panel.js"></script>
+    <script defer src="/admin/updater.js"></script>
+    <script defer src="/admin/navigation.js"></script>
+    <script defer src="/admin/sidebar.js"></script>
+    <script defer src="/admin/connections.js"></script>
+    <script defer src="/admin/account-tools.js"></script>
+    <script defer src="/admin/accounts.js"></script>
+    <script defer src="/admin/analytics.js"></script>
+    <script defer src="/admin/analytics-view.js"></script>
+    <script defer src="/admin/request-records.js"></script>
+    <script defer src="/admin/reports.js"></script>
+    <script defer src="/admin/notifications.js"></script>
+    <script defer src="/admin/routing.js"></script>
+    <script defer src="/admin/playground.js"></script>
+    <script defer src="/admin/diagnostics.js"></script>
+    <script defer src="/admin/operations.js"></script>
+    <script defer src="/admin/settings-tools.js"></script>
+    <script defer src="/admin/settings.js"></script>
     <script defer src="/admin/keys.js"></script>
     <script defer src="/admin/model-policies.js"></script>
     <script defer src="/admin/admission.js"></script>
     <script defer src="/admin/jobs.js"></script>
     <script defer src="/admin/storage.js"></script>
+    <script defer src="/admin/backup-schedule.js"></script>
     <script defer src="/admin/app.js"></script>
   </head>
   <body>
@@ -49,13 +69,17 @@
     </section>
 
     <div id="dashboard" class="app-shell" hidden>
-      <aside class="sidebar">
-        <a class="sidebar-brand" href="/admin/" aria-label="Clodesen 控制台首页">
-          <span class="brand-mark" aria-hidden="true">C</span>
-          <span><strong>Clodesen</strong><small>控制台</small></span>
-        </a>
+      <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true" hidden></div>
+      <aside id="workspace-sidebar" class="sidebar" aria-label="工作区导航" tabindex="-1">
+        <div class="sidebar-heading">
+          <a class="sidebar-brand" href="/admin/" aria-label="Clodesen 控制台首页">
+            <span class="brand-mark" aria-hidden="true">C</span>
+            <span><strong>Clodesen</strong><small>控制台</small></span>
+          </a>
+          <button id="sidebar-close" class="icon-button sidebar-close" type="button" aria-label="关闭导航" title="关闭导航"><svg class="shell-icon" aria-hidden="true"><use href="/admin/navigation-icons.svg#x"></use></svg></button>
+        </div>
         <div class="sidebar-label">工作区</div>
-        <div id="main-tabs" class="main-tabs" role="tablist" aria-label="管理视图">
+        <div id="main-tabs" class="main-tabs" role="tablist" aria-label="管理视图" aria-orientation="vertical">
           <button class="main-tab" id="accounts-tab" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="accounts-view" data-view="accounts"><span class="nav-icon" aria-hidden="true">⌘</span><span>账号与积分</span></button>
           <button class="main-tab" id="models-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="analytics-view" data-view="analytics"><span class="nav-icon" aria-hidden="true">◒</span><span>模型与统计</span></button>
           <button class="main-tab" id="records-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="records-view" data-view="records"><span class="nav-icon" aria-hidden="true">▤</span><span>使用记录</span></button>
@@ -67,8 +91,8 @@
 
       <div class="app-column">
         <header class="topbar">
-          <div class="topbar-context"><span class="mobile-brand-mark brand-mark" aria-hidden="true">C</span><div><span class="topbar-kicker">管理控制台</span><strong>账号路由与积分中心</strong></div></div>
-          <div class="topbar-actions"><span id="service-state" class="service-state"><i aria-hidden="true"></i><span>连接中</span></span><span class="topbar-divider" aria-hidden="true"></span><button id="logout-button" class="button button-quiet" type="button"><span>退出</span><span class="button-icon" aria-hidden="true">↗</span></button></div>
+          <div class="topbar-context"><button id="sidebar-toggle" class="icon-button sidebar-toggle" type="button" aria-label="打开导航" title="打开导航" aria-expanded="false" aria-controls="workspace-sidebar"><svg class="shell-icon" aria-hidden="true"><use href="/admin/navigation-icons.svg#menu"></use></svg></button><div><span class="topbar-kicker">Clodesen 控制台</span><strong id="current-view-label">账号与积分</strong></div></div>
+          <div class="topbar-actions"><span id="service-state" class="service-state"><i aria-hidden="true"></i><span>连接中</span></span><button id="jobs-open" class="button button-quiet" type="button">任务</button><span class="topbar-divider" aria-hidden="true"></span><button id="logout-button" class="button button-quiet" type="button"><span>退出</span><span class="button-icon" aria-hidden="true">↗</span></button></div>
         </header>
 
         <main id="main-content" class="main-content">
@@ -80,7 +104,7 @@
               <div id="request-record-error" class="inline-error" role="alert" hidden></div><div id="request-record-empty" class="empty-state" hidden><strong>暂无模型请求记录</strong></div><div id="request-record-table-wrap" class="table-wrap" hidden><table class="account-table request-record-table"><thead><tr><th>时间</th><th>模型</th><th>类型</th><th>端点</th><th>账号</th><th>耗时</th><th>首字/提示词</th><th>思考等级</th><th>状态</th><th>参数</th><th>密钥 / 客户端 IP</th></tr></thead><tbody id="request-record-rows"></tbody></table></div><div id="request-record-cards" class="request-record-cards" hidden></div><div id="request-record-pagination" class="credit-usage-pagination" hidden><button id="request-prev-page" class="button button-secondary" type="button">上一页</button><span id="request-page-label">第 1 / 1 页</span><button id="request-next-page" class="button button-secondary" type="button">下一页</button></div></section>
           </section>
           <div id="accounts-view" role="tabpanel" aria-labelledby="accounts-tab">
-            <section class="page-heading"><div><p class="eyebrow">账号池概览</p><h1>账号与积分</h1><p class="page-lead">查看账号健康度、积分分布和兑换额度，保持请求池随时可用。</p></div><div class="heading-actions"><div class="strategy-control" role="group" aria-label="账号选择策略"><button type="button" data-strategy="round_robin" aria-pressed="false">轮询</button><button type="button" data-strategy="random" aria-pressed="false">随机</button><button type="button" data-strategy="fixed" aria-pressed="true">固定</button></div><button id="refresh-button" class="button button-secondary" type="button"><span class="button-icon" aria-hidden="true">↻</span><span>刷新积分</span></button><button id="account-open" class="button button-primary" type="button"><span class="button-icon" aria-hidden="true">＋</span><span>添加账号</span></button></div></section>
+            <section class="page-heading"><div><p class="eyebrow">账号池概览</p><h1>账号与积分</h1><p class="page-lead">查看账号健康度、积分分布和兑换额度，保持请求池随时可用。</p></div><div class="heading-actions"><div class="strategy-control" role="group" aria-label="账号选择策略"></div><button id="refresh-button" class="button button-secondary" type="button"><span class="button-icon" aria-hidden="true">↻</span><span>刷新积分</span></button><button id="account-open" class="button button-primary" type="button"><span class="button-icon" aria-hidden="true">＋</span><span>添加账号</span></button></div></section>
 
             <section class="summary-strip" aria-label="账号池摘要">
               <div class="summary-primary"><div class="summary-primary-values"><div><span class="summary-label">可用积分合计</span><strong id="available-credits" class="summary-value">--</strong></div><div><span class="summary-label">已消耗积分合计</span><strong id="consumed-credits" class="summary-value">--</strong></div></div><span class="summary-caption">启用账号的当前可用额度</span></div>
@@ -94,13 +118,14 @@
           <section id="analytics-view" class="analytics-view" role="tabpanel" aria-labelledby="models-tab" hidden>
             <div class="page-heading"><div><p class="eyebrow">数据概览</p><h1>模型与调用统计</h1><p class="page-lead">查看模型价格、调用表现和积分记录。</p></div><button id="analytics-refresh" class="button button-secondary" type="button"><span class="button-icon" aria-hidden="true">↻</span><span>刷新数据</span></button></div>
             <section class="analytics-summary" aria-label="调用摘要"><div class="summary-stat"><span class="summary-label">总请求</span><strong id="usage-total">--</strong></div><div class="summary-stat"><span class="summary-label">成功</span><strong id="usage-successes">--</strong></div><div class="summary-stat"><span class="summary-label">失败</span><strong id="usage-failures">--</strong></div><div class="summary-stat"><span class="summary-label">成功率</span><strong id="usage-success-rate">--</strong></div><div class="summary-stat"><span class="summary-label">平均耗时</span><strong id="usage-latency">--</strong></div><p id="usage-period" class="analytics-period">累计统计</p></section>
+            <div id="usage-error" class="inline-error" role="alert" hidden></div>
             <section class="analytics-section" aria-labelledby="models-title"><div class="section-heading"><div><p class="section-kicker">MODEL CATALOG</p><h2 id="models-title">模型目录</h2><p id="model-count" class="muted">等待加载</p></div><span id="model-policy-revision" class="section-note"></span></div><div id="model-error" class="inline-error" role="alert" hidden></div><div id="model-empty" class="empty-state" hidden><strong>没有可显示的模型</strong></div><div id="model-table-wrap" class="table-wrap" hidden><table class="account-table model-table"><thead><tr><th>模型 ID / 公开名称</th><th id="model-credits-heading">积分</th><th>策略</th></tr></thead><tbody id="model-rows"></tbody></table></div><div id="model-cards" class="model-cards" hidden></div></section>
             <section class="analytics-section" aria-labelledby="model-credit-stats-title"><div class="section-heading"><div><p class="section-kicker">MODEL PERFORMANCE</p><h2 id="model-credit-stats-title">按模型统计</h2><p class="muted">根据积分记录汇总请求、扣除与退回积分</p></div></div><div id="model-credit-stats-empty" class="empty-state" hidden><strong>还没有积分统计记录</strong></div><div id="model-credit-stats-table-wrap" class="table-wrap" hidden><table class="account-table usage-table"><thead><tr><th>模型</th><th>请求次数</th><th>扣除积分</th><th>退回积分</th><th>净消耗</th><th>最近使用</th></tr></thead><tbody id="model-credit-stats-rows"></tbody></table></div><div id="model-credit-stats-cards" class="usage-cards" hidden></div></section>
-            <section class="analytics-section" aria-labelledby="credit-usage-title"><div class="section-heading"><div><p class="section-kicker">CREDIT LEDGER</p><h2 id="credit-usage-title">积分使用记录</h2><p id="credit-usage-count" class="muted">等待加载</p></div><span class="section-note">即时记录 · 每小时同步余额</span></div><div id="credit-usage-error" class="inline-error" role="alert" hidden></div><div id="credit-usage-empty" class="empty-state" hidden><strong>还没有积分使用记录</strong></div><div id="credit-usage-table-wrap" class="table-wrap" hidden><table class="account-table credit-usage-table"><thead><tr><th>时间</th><th>账号</th><th>模型</th><th>积分变动</th><th>记录详情</th></tr></thead><tbody id="credit-usage-rows"></tbody></table></div><div id="credit-usage-pagination" class="credit-usage-pagination" hidden><button id="credit-prev-page" class="button button-secondary" type="button">上一页</button><span id="credit-page-label">第 1 / 1 页</span><button id="credit-next-page" class="button button-secondary" type="button">下一页</button></div></section>
+            <section class="analytics-section" aria-labelledby="credit-usage-title"><div class="section-heading"><div><p class="section-kicker">CREDIT LEDGER</p><h2 id="credit-usage-title">积分使用记录</h2><p id="credit-usage-count" class="muted">等待加载</p></div><span class="section-note">上游记录与余额按各自缓存周期更新</span></div><div id="credit-usage-error" class="inline-error" role="alert" hidden></div><div id="credit-usage-empty" class="empty-state" hidden><strong>还没有积分使用记录</strong></div><div id="credit-usage-table-wrap" class="table-wrap" hidden><table class="account-table credit-usage-table"><thead><tr><th>时间</th><th>账号</th><th>模型</th><th>积分变动</th><th>记录详情</th></tr></thead><tbody id="credit-usage-rows"></tbody></table></div><div id="credit-usage-pagination" class="credit-usage-pagination" hidden><button id="credit-prev-page" class="button button-secondary" type="button">上一页</button><span id="credit-page-label">第 1 / 1 页</span><button id="credit-next-page" class="button button-secondary" type="button">下一页</button></div></section>
           </section>
 
           <section id="keys-view" role="tabpanel" aria-labelledby="keys-tab" hidden>
-            <div class="page-heading"><div><p class="eyebrow">客户端访问</p><h1>API 密钥</h1></div><div class="heading-actions"><button id="keys-refresh" class="button button-secondary" type="button">刷新</button><button id="keys-create" class="button button-primary" type="button">创建密钥</button></div></div>
+            <div class="page-heading"><div><p class="eyebrow">客户端访问</p><h1>API 密钥</h1></div><div class="heading-actions"><button id="connections-open" class="button button-secondary" type="button">接入配置</button><button id="keys-refresh" class="button button-secondary" type="button">刷新</button><button id="keys-create" class="button button-primary" type="button">创建密钥</button></div></div>
             <p id="keys-deployment" class="field-note" hidden></p>
             <p id="keys-count" class="muted" role="status">正在加载密钥</p>
             <div id="keys-error" class="inline-error" role="alert" hidden></div>
@@ -119,7 +144,7 @@
                 <div class="update-actions">
                   <details id="update-source-disclosure" class="update-source-disclosure">
                     <summary class="update-source-trigger"><span class="update-source-trigger-label">下载源</span><strong id="update-source-current">直连</strong><span class="update-source-trigger-icon" aria-hidden="true">⌄</span></summary>
-                    <fieldset class="update-source-panel">
+                    <fieldset id="update-source-panel" class="floating-panel update-source-panel">
                       <legend>GitHub 加速源</legend>
                       <div class="update-source-body">
                         <div id="update-source-options" class="update-source-options" role="radiogroup" aria-label="GitHub 加速源"></div>
@@ -175,8 +200,11 @@
       <p class="field-note">账期使用全局配额时区。Token 与积分限额仅允许具有已验证计量及请求上界的模型；中断后的未知用量保留预留，等待对账。</p>
       <p id="key-form-error" class="form-error" role="alert"></p><div class="dialog-actions"><button class="button button-secondary" type="button" data-close="key-editor">取消</button><button id="key-save" class="button button-primary" type="submit">创建密钥</button></div>
     </form></dialog>
-    <dialog id="key-secret-dialog" class="dialog-shell dialog-compact"><div class="dialog-content"><div class="dialog-heading"><h2>保存密钥</h2><button class="icon-button" type="button" data-close="key-secret-dialog" aria-label="关闭">×</button></div><p class="field-note">完整密钥仅显示一次。关闭后无法再次查看。</p><textarea id="key-secret" rows="3" readonly autocomplete="off" spellcheck="false" aria-label="完整 API 密钥"></textarea><p id="key-copy-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="key-copy" class="button button-secondary" type="button">复制</button><button class="button button-primary" type="button" data-close="key-secret-dialog">完成</button></div></div></dialog>
+    <dialog id="key-secret-dialog" class="dialog-shell dialog-compact"><div class="dialog-content"><div class="dialog-heading"><h2>保存密钥</h2><button class="icon-button" type="button" data-close="key-secret-dialog" aria-label="关闭">×</button></div><p class="field-note">完整密钥仅显示一次。关闭后无法再次查看。</p><textarea id="key-secret" rows="3" readonly autocomplete="off" spellcheck="false" aria-label="完整 API 密钥"></textarea><p id="key-copy-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="key-copy" class="button button-secondary" type="button">复制</button><button id="key-connect" class="button button-secondary" type="button">生成接入配置</button><button class="button button-primary" type="button" data-close="key-secret-dialog">完成</button></div></div></dialog>
+    <dialog id="connection-dialog" class="dialog-shell"><div class="dialog-content"><div class="dialog-heading"><h2>接入配置</h2><button class="icon-button" type="button" data-close="connection-dialog" aria-label="关闭">×</button></div><div class="key-form-grid"><label>格式<select id="connection-format"><option value="curl">curl</option><option value="python">Python</option><option value="client">客户端 JSON</option></select></label><label>模型<select id="connection-model"></select></label></div><textarea id="connection-output" rows="14" readonly autocomplete="off" spellcheck="false" aria-label="接入配置"></textarea><p id="connection-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="connection-copy" class="button button-secondary" type="button">复制配置</button><button class="button button-primary" type="button" data-close="connection-dialog">完成</button></div></div></dialog>
     <dialog id="key-confirm-dialog" class="dialog-shell dialog-compact"><div class="dialog-content"><div class="dialog-heading"><h2 id="key-confirm-title">确认操作</h2><button class="icon-button" type="button" data-close="key-confirm-dialog" aria-label="关闭">×</button></div><p id="key-confirm-copy" class="confirm-copy"></p><p id="key-confirm-error" class="form-error" role="alert"></p><div class="dialog-actions"><button class="button button-secondary" type="button" data-close="key-confirm-dialog">取消</button><button id="key-confirm-submit" class="button button-danger" type="button">确认</button></div></div></dialog>
+    <dialog id="jobs-dialog" class="dialog-shell task-dialog" aria-labelledby="jobs-title"><div class="dialog-content"><div class="dialog-heading"><h2 id="jobs-title">后台任务</h2><button class="icon-button" type="button" data-close="jobs-dialog" aria-label="关闭">×</button></div><div class="job-filters"><label>类型<select id="jobs-kind"><option value="">全部任务</option><option value="checkin">签到</option><option value="redeem">兑换</option><option value="refresh">刷新账号</option><option value="probe">探测连接</option></select></label><label>状态<select id="jobs-state"><option value="">全部状态</option><option value="active">进行中</option><option value="finished">已结束</option></select></label><button id="jobs-refresh" class="button button-secondary" type="button">刷新</button></div><p id="jobs-summary" class="field-note" role="status"></p><p id="jobs-error" class="form-error" role="alert"></p><p id="jobs-empty" class="empty-state" hidden>暂无符合条件的任务</p><div id="jobs-list"></div></div></dialog>
+    <dialog id="diagnostic-dialog" class="dialog-shell" aria-labelledby="diagnostic-title"><div class="dialog-content"><div class="dialog-heading"><h2 id="diagnostic-title">请求诊断</h2><button class="icon-button" type="button" data-close="diagnostic-dialog" aria-label="关闭">×</button></div><div id="diagnostic-content"></div><p id="diagnostic-error" class="form-error" role="alert"></p><div class="dialog-actions"><button id="diagnostic-copy" class="button button-secondary" type="button">复制诊断</button><button class="button button-primary" type="button" data-close="diagnostic-dialog">完成</button></div></div></dialog>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </body>
 </html>

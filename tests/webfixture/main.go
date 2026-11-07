@@ -41,21 +41,29 @@ func main() {
 		case "/api/openai/v1/chat/completions":
 			var body struct {
 				Model    string `json:"model"`
+				Stream   bool   `json:"stream"`
 				Messages []struct {
 					Content string `json:"content"`
 				} `json:"messages"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"fixture stream\"}}]}\n\ndata: [DONE]\n\n")
+				return
+			}
 			if len(body.Messages) > 0 && body.Messages[0].Content == "fixture:429" {
 				w.Header().Set("Retry-After", "120")
 				w.WriteHeader(429)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "rate_limit_exceeded"}})
 				return
 			}
-			result = map[string]any{"id": "fixture-completion", "object": "chat.completion", "model": body.Model}
+			result = map[string]any{"id": "fixture-completion", "object": "chat.completion", "model": body.Model, "choices": []any{map[string]any{"message": map[string]string{"role": "assistant", "content": "fixture reply"}}}}
 			if len(body.Messages) > 0 && body.Messages[0].Content == "fixture:metered" {
 				result.(map[string]any)["usage"] = map[string]int{"total_tokens": 20, "credits": 3}
 			}
+		case "/api/openai/v1/images/generations":
+			result = map[string]any{"data": []any{map[string]string{"b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1sAAAAASUVORK5CYII="}}}
 		case "/api/checkin":
 			result = map[string]any{"enabled": true, "checkedIn": true, "balance": 1234}
 		case "/api/limited-redemption":

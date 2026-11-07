@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"clodesen2api/internal/config"
 	"clodesen2api/internal/controlstore"
 	"clodesen2api/internal/upstream"
 )
@@ -57,7 +58,8 @@ func OpenControlAccounts(control *controlstore.Store, path, strategy string, ini
 		if saved.Strategy == "" {
 			saved.Strategy = "fixed"
 		}
-		if normalizeStrategy(saved.Strategy) == "" {
+		saved.Strategy = config.StoredStrategy(saved.Strategy)
+		if saved.Strategy == "" {
 			return nil, errors.New("invalid account strategy")
 		}
 		if err := control.Import(context.Background(), "accounts", path, saved); err != nil {
@@ -78,7 +80,8 @@ func (s *AccountStore) syncLocked() error {
 	if err != nil {
 		return err
 	}
-	if saved.Version != 1 || normalizeStrategy(saved.Strategy) == "" {
+	saved.Strategy = config.StoredStrategy(saved.Strategy)
+	if saved.Version != 1 || saved.Strategy == "" {
 		return errors.New("invalid account store")
 	}
 	if err := validateCredentials(saved.Accounts); err != nil {
@@ -137,7 +140,7 @@ func OpenAccountStore(path, strategy string, initial []upstream.AccountCredentia
 			return nil, fmt.Errorf("invalid admin accounts file: %w", err)
 		}
 		store.accounts = copyCredentials(saved.Accounts)
-		store.strategy = normalizeStrategy(saved.Strategy)
+		store.strategy = config.StoredStrategy(saved.Strategy)
 		if store.strategy == "" {
 			store.strategy = normalizeStrategy(strategy)
 		}
@@ -203,7 +206,7 @@ func (s *AccountStore) Replace(accounts []upstream.AccountCredential) error {
 func (s *AccountStore) SetStrategy(strategy string) error {
 	strategy = normalizeStrategy(strategy)
 	if strategy == "" {
-		return errors.New("strategy must be round_robin, random, or fixed")
+		return errors.New("invalid account strategy")
 	}
 	if s.control != nil {
 		return s.mutate(func(saved *accountFile) error { saved.Strategy = strategy; return nil })
@@ -277,6 +280,10 @@ func (s *AccountStore) mutate(change func(*accountFile) error) error {
 		}
 		if saved.Version != 1 {
 			return nil, errors.New("invalid accounts schema")
+		}
+		saved.Strategy = config.StoredStrategy(saved.Strategy)
+		if saved.Strategy == "" {
+			return nil, errors.New("invalid account strategy")
 		}
 		if err := change(&saved); err != nil {
 			return nil, err
@@ -360,11 +367,7 @@ func copyCredentials(accounts []upstream.AccountCredential) []upstream.AccountCr
 }
 
 func normalizeStrategy(strategy string) string {
-	strategy = strings.ToLower(strings.TrimSpace(strategy))
-	if strategy == "round_robin" || strategy == "random" || strategy == "fixed" {
-		return strategy
-	}
-	return ""
+	return config.NormalizeStrategy(strategy)
 }
 
 func newAccountID() (string, error) {

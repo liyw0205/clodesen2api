@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"clodesen2api/internal/config"
 )
 
 type AccountStatus struct {
@@ -197,8 +199,8 @@ func (u *Upstream) Strategy() string {
 }
 
 func (u *Upstream) SetStrategy(strategy string) error {
-	strategy = strings.ToLower(strings.TrimSpace(strategy))
-	if strategy != "round_robin" && strategy != "random" && strategy != "fixed" {
+	strategy = config.NormalizeStrategy(strategy)
+	if strategy == "" {
 		return fmt.Errorf("invalid strategy %q", strategy)
 	}
 	u.poolMu.Lock()

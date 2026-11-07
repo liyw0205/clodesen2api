@@ -68,6 +68,27 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		var err error
+		if len(adminHandlers) > 0 {
+			if provider, ok := adminHandlers[0].(interface{ Ready(context.Context) error }); ok {
+				err = provider.Ready(ctx)
+			}
+		}
+		if err != nil || up.RoutingHealth().Available == 0 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ready"))
+	})
 	staticFiles, _ := fs.Sub(adminAssets, "web")
 	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
@@ -465,7 +486,7 @@ func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {
 
 func adminHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
