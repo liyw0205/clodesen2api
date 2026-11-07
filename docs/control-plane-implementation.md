@@ -1,6 +1,6 @@
 # Control plane implementation
 
-This tracks v0.3.0, adapted from codebuddy2api v1.5.4 to Go and embedded static
+This tracks v0.3.1, adapted from codebuddy2api v1.5.4 to Go and embedded static
 JavaScript. Core implementation and release gates below have passed. Keep the
 upstream protocol and account workflows; runtime limits remain documented below.
 
@@ -50,13 +50,15 @@ criteria: [Chinese implementation plan](codebuddy2api-reference-plan.zh-CN.md).
 - [x] Concurrent-store quota, token-only/credit-only and partial overrun rejection tests.
 - [x] Admission lease heartbeat/fencing and request/body/response budget review.
 - [x] JSON/multipart 408 and shared route-retry/relogin attempt-budget regressions.
-- [x] Persistent checkin/redemption/refresh/connection-probe jobs and progress/cancel/retry UI.
+- [x] Persistent checkin/redemption/refresh/connection-probe jobs; manual account actions refresh data on completion without a task panel.
 - [x] Legacy redemption date import and schedule receipts independent of job history.
 - [x] Single-flight refresh and backend cache state/age/error endpoint.
 - [x] Cache state/partial failures UI and account-specific stale snapshot preservation.
 - [x] Concurrent admission, cancellation, stream failure and persistent job reload tests.
-- [x] Queue-capacity/restart/cancel/retry Go tests and browser reload/progress flow.
+- [x] Queue-capacity/restart/cancel/retry Go tests and browser reload/background-action flow.
 - [x] Schedule receipts prevent same-day replay after changing code/targets.
+- [x] Explicit future-time edits rearm today's schedule; startup does not execute future checkins early.
+- [x] Insufficient-credit image failover and expired-cooldown balance verification above 100.
 
 ## P4 - Control persistence and operations
 
@@ -94,7 +96,8 @@ replacement-process restore path has not run on Windows.
 - [x] Commit task files, push main/version and verify remote refs/CI.
 
 Release [v0.3.0](https://github.com/liyw0205/clodesen2api/releases/tag/v0.3.0)
-targets `5c018b813cc987acb4fcac9b8402df789bcf91c8`. Both
+targets `5c018b813cc987acb4fcac9b8402df789bcf91c8`; this patch is prepared as
+v0.3.1. Both
 [main CI](https://github.com/liyw0205/clodesen2api/actions/runs/42310908071) and
 [tag CI](https://github.com/liyw0205/clodesen2api/actions/runs/42312031459)
 passed Go 1.23, stable tests/vet, Linux race, five browser flows and five-platform
@@ -105,5 +108,6 @@ The initial run was cancelled during slow apt/font installation. Browser CI now
 uses installed Chrome on pinned Ubuntu 24.04 with a timeout; the replacement run
 passed. The release tag remains immutable; this checklist is a delivery receipt.
 
-The working tree also contains pre-existing unrelated binaries, archives and
-browser artifacts. They must not be staged, removed or reverted for this task.
+The working tree also contains local memory, unrelated binaries, archives and
+browser artifacts. `.ai-memory/` and these generated artifacts are ignored and
+must not be staged or published.

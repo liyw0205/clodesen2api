@@ -19,9 +19,10 @@ import (
 // Config is immutable once passed to a running upstream session.
 // CLI and explicit CLODESEN2API_SECTION_KEY environment values override files.
 type Config struct {
-	path    string
-	sources map[string]string
-	Server  struct {
+	path           string
+	sources        map[string]string
+	ScheduleRearms map[string]time.Time `json:"-"`
+	Server         struct {
 		Addr string
 	}
 	Upstream struct {

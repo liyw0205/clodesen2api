@@ -21,6 +21,12 @@ func consumeAttempt(ctx context.Context) error {
 	return nil
 }
 
+func refundAttempt(ctx context.Context) {
+	if remaining, ok := ctx.Value(attemptBudgetKey{}).(*atomic.Int32); ok {
+		remaining.Add(1)
+	}
+}
+
 const maxBufferedResponse = 128 << 20
 
 func readResponse(body io.Reader) ([]byte, error) {

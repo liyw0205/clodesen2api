@@ -15,6 +15,7 @@ type usageBody struct {
 	line     []byte
 	usage    []byte
 	overflow bool
+	discard  bool
 }
 
 func (b *usageBody) Read(p []byte) (int, error) {
@@ -48,6 +49,8 @@ func (b *usageBody) Close() error {
 	if len(b.line) > 0 {
 		b.consume()
 	}
-	admission.ReportUsage(b.ctx, b.usage)
+	if !b.discard {
+		admission.ReportUsage(b.ctx, b.usage)
+	}
 	return b.ReadCloser.Close()
 }

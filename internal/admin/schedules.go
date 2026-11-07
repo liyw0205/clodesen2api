@@ -8,7 +8,7 @@ import (
 
 // RunSchedules shares the persistent job queue with manually submitted work.
 func (s *Service) RunSchedules(ctx context.Context) {
-	s.scheduleJobs(ctx, time.Now(), true)
+	s.scheduleJobs(ctx, time.Now())
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -16,11 +16,11 @@ func (s *Service) RunSchedules(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			s.scheduleJobs(ctx, now, false)
+			s.scheduleJobs(ctx, now)
 		}
 	}
 }
-func (s *Service) scheduleJobs(ctx context.Context, now time.Time, boot bool) {
+func (s *Service) scheduleJobs(ctx context.Context, now time.Time) {
 	if err := s.SyncSettings(ctx); err != nil {
 		log.Printf("[jobs] scheduled settings unavailable")
 		return
@@ -36,7 +36,7 @@ func (s *Service) scheduleJobs(ctx context.Context, now time.Time, boot bool) {
 		s.configMu.Unlock()
 		return
 	}
-	checkin, redemption := s.cfg.Checkin, s.cfg.Redemption
+	checkin, redemption, rearms := s.cfg.Checkin, s.cfg.Redemption, s.cfg.ScheduleRearms
 	s.configMu.Unlock()
 	targets := []string{}
 	for _, account := range s.store.Accounts() {
@@ -47,31 +47,35 @@ func (s *Service) scheduleJobs(ctx context.Context, now time.Time, boot bool) {
 	if len(targets) == 0 {
 		return
 	}
-	due := func(at, tz string) (string, bool) {
+	due := func(kind, at, tz string) (string, bool, time.Time) {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
-			return "", false
+			return "", false, time.Time{}
 		}
 		hm, err := time.Parse("15:04", at)
 		if err != nil {
-			return "", false
+			return "", false, time.Time{}
 		}
 		local := now.In(loc)
 		target := time.Date(local.Year(), local.Month(), local.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
-		return local.Format("2006-01-02"), !local.Before(target)
+		rearm := time.Time{}
+		if rearms[kind].Equal(target) {
+			rearm = rearms[kind]
+		}
+		return local.Format("2006-01-02"), !local.Before(target), rearm
 	}
 	if checkin.Enable {
-		date, ready := due(checkin.At, checkin.Timezone)
-		if date != "" && (ready || boot) {
-			if _, _, err := store.SubmitScheduled(ctx, "checkin", targets, nil, date); err != nil {
+		date, ready, rearm := due("checkin", checkin.At, checkin.Timezone)
+		if ready {
+			if _, _, err := store.SubmitScheduledRearmed(ctx, "checkin", targets, nil, date, rearm); err != nil {
 				log.Printf("[jobs] scheduled checkin submission failed")
 			}
 		}
 	}
 	if redemption.Enable && redemption.Code != "" {
-		date, ready := due(redemption.At, "Asia/Shanghai")
+		date, ready, rearm := due("redeem", redemption.At, "Asia/Shanghai")
 		if ready {
-			if _, _, err := store.SubmitScheduled(ctx, "redeem", targets, map[string]string{"code": redemption.Code}, date); err != nil {
+			if _, _, err := store.SubmitScheduledRearmed(ctx, "redeem", targets, map[string]string{"code": redemption.Code}, date, rearm); err != nil {
 				log.Printf("[jobs] scheduled redemption submission failed")
 			}
 		}

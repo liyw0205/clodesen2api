@@ -4,6 +4,14 @@
 /run.pid
 /data/
 /bin/
+/.ai-memory/
+/.inspect-*
+/.release-*
+/.deploy-*
+/.neumorphism-test/
+/.user-*.png
+/clodesen2api-*-new
+/clodesen2api-source-*.tar.gz
 /.build-test/
 /.package-stage-*/
 /.packaged-bin.*

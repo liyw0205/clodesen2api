@@ -195,7 +195,7 @@ func run() bool {
 	}()
 	go func() {
 		defer background.Done()
-		ticker := time.NewTicker(time.Hour)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {

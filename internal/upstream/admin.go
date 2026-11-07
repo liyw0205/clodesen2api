@@ -156,12 +156,12 @@ func (u *Upstream) ReplaceAccounts(credentials []AccountCredential) error {
 	nextCooldown := make(map[*Upstream]time.Time)
 	nextReason := make(map[*Upstream]string)
 	for _, account := range prepared {
-		if until := oldCooldown[account.accountID]; until.After(time.Now()) {
+		if until := oldCooldown[account.accountID]; !until.IsZero() && (until.After(time.Now()) || normalizeCooldownReason(oldReason[account.accountID]) == cooldownReasonInsufficientCredits) {
 			nextCooldown[account] = until
 			nextReason[account] = normalizeCooldownReason(oldReason[account.accountID])
 		}
 		for _, credential := range credentials {
-			if credential.ID == account.accountID && credential.CooldownUntil != nil && credential.CooldownUntil.After(time.Now()) {
+			if credential.ID == account.accountID && credential.CooldownUntil != nil && (credential.CooldownUntil.After(time.Now()) || normalizeCooldownReason(credential.CooldownReason) == cooldownReasonInsufficientCredits) {
 				if previous := nextCooldown[account]; credential.CooldownUntil.After(previous) {
 					nextCooldown[account] = credential.CooldownUntil.UTC()
 					nextReason[account] = normalizeCooldownReason(credential.CooldownReason)
@@ -328,11 +328,6 @@ func (u *Upstream) refreshAccountStatus(ctx context.Context, status AccountStatu
 		status.CheckedIn = boolPointer(state.CheckedIn)
 		if state.BalanceKnown {
 			status.Balance = int64Pointer(state.Balance)
-			if state.Balance >= insufficientCreditsThreshold {
-				owner.clearCreditCooldown(u)
-			} else {
-				owner.coolDownUntil(u, time.Now().Add(insufficientCreditsCooldown), cooldownReasonInsufficientCredits)
-			}
 		}
 	}
 
@@ -437,11 +432,7 @@ func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code str
 	}
 	result.Status = "success"
 	result.Message = fmt.Sprintf("到账 %d 积分", *result.Credits)
-	if account.owner != nil {
-		account.owner.clearCreditCooldown(account)
-	} else {
-		account.clearCreditCooldown(account)
-	}
+	account.refreshCreditBalance(ctx)
 	return result
 }
 

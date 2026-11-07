@@ -52,6 +52,7 @@ type Upstream struct {
 	rpmInFlight          map[string]int
 	fixedAccount         *Upstream
 	poolMu               sync.Mutex
+	creditCheckMu        sync.Mutex
 	nextAccount          int
 	cooldownUntil        map[*Upstream]time.Time
 	cooldownReason       map[*Upstream]string
@@ -205,7 +206,7 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 		account.owner = pool
 		account.creditPricing = make(map[string]int64)
 		pool.accounts = append(pool.accounts, account)
-		if credential.CooldownUntil != nil && credential.CooldownUntil.After(time.Now()) {
+		if credential.CooldownUntil != nil && (credential.CooldownUntil.After(time.Now()) || normalizeCooldownReason(credential.CooldownReason) == cooldownReasonInsufficientCredits) {
 			pool.cooldownUntil[account] = credential.CooldownUntil.UTC()
 			pool.cooldownReason[account] = normalizeCooldownReason(credential.CooldownReason)
 		}
@@ -596,6 +597,12 @@ func (u *Upstream) allocateImageRoute(ctx context.Context, host, openAIBaseURL s
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
 		return imageRoute{targetURL: openAIBaseURL + request.Path}, nil
 	}
+	if insufficientCredits(resp.StatusCode, body) {
+		return imageRoute{}, &safeAccountRetryError{
+			err: errors.New("image route rejected for insufficient credits"), creditRejected: true,
+			response: &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body},
+		}
+	}
 	if resp.StatusCode/100 != 2 {
 		upstreamResponse := &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
@@ -655,6 +662,7 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request o
 	ctx = context.WithValue(ctx, attemptBudgetKey{}, &budget)
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(admission.Limits(ctx).RequestTimeoutSeconds)*time.Second)
 	defer cancel()
+	u.recheckExpiredCreditCooldowns(ctx)
 	if len(u.accountsSnapshot()) == 0 {
 		if u.poolMode {
 			return &NoAccountAvailableError{}, false
@@ -682,6 +690,7 @@ func (u *Upstream) Forward(ctx context.Context, w http.ResponseWriter, request o
 			}
 		}
 		if insufficient != nil {
+			u.handleCreditRejection(ctx, u)
 			insufficient.writeTo(w)
 			return nil, true
 		}
@@ -722,6 +731,7 @@ type safeAccountRetryError struct {
 	response       *bufferedResponse
 	cooldownUntil  *time.Time
 	disableAccount bool
+	creditRejected bool
 }
 
 func (e *safeAccountRetryError) Error() string { return e.err.Error() }
@@ -734,6 +744,7 @@ func wrapSafeAccountRetryError(prefix string, err error) error {
 		retryable.response = source.response
 		retryable.cooldownUntil = source.cooldownUntil
 		retryable.disableAccount = source.disableAccount
+		retryable.creditRejected = source.creditRejected
 	}
 	return fmt.Errorf("%s: %w", prefix, retryable)
 }
@@ -769,12 +780,11 @@ func (u *Upstream) forwardPool(ctx context.Context, w http.ResponseWriter, reque
 		}
 		if creditResponse != nil {
 			insufficient = creditResponse
-			u.coolDown(candidate.account)
-			log.Printf("[account] account %d exhausted credits; cooling down for %s", candidate.index+1, insufficientCreditsCooldown)
-			if imageRequest {
-				insufficient.writeTo(w)
-				return nil, true
-			}
+			u.handleCreditRejection(ctx, candidate.account)
+			// An explicit balance rejection did not generate anything. It must
+			// not consume the budget for potentially billable attempts.
+			refundAttempt(ctx)
+			attempted--
 			continue
 		}
 		if err != nil {
@@ -837,8 +847,11 @@ func (u *Upstream) selectAccounts() ([]accountCandidate, time.Duration) {
 			continue
 		}
 		until := u.cooldownUntil[account]
-		if until.After(now) {
+		if u.accountCoolingLocked(account, now) {
 			wait := time.Until(until)
+			if wait <= 0 {
+				wait = time.Second
+			}
 			if earliest == 0 || wait < earliest {
 				earliest = wait
 			}
@@ -881,7 +894,7 @@ func (u *Upstream) selectAccounts() ([]accountCandidate, time.Duration) {
 		if !account.enabled {
 			continue
 		}
-		if until := u.cooldownUntil[account]; until.After(now) {
+		if u.accountCoolingLocked(account, now) {
 			continue
 		}
 		if u.rpmInFlight[account.accountID] >= configuredRPM(u.rpmLimit) {
@@ -915,7 +928,7 @@ func (u *Upstream) reserveAccountRequest(account *Upstream) bool {
 	}
 	owner.poolMu.Lock()
 	defer owner.poolMu.Unlock()
-	if (owner.poolMode && !account.enabled) || owner.cooldownUntil[account].After(time.Now()) {
+	if (owner.poolMode && !account.enabled) || owner.accountCoolingLocked(account, time.Now()) {
 		return false
 	}
 	if owner.rpmInFlight == nil {
@@ -957,6 +970,10 @@ func (u *Upstream) forwardReservedSingle(ctx context.Context, w http.ResponseWri
 	started := time.Now()
 	tracked := &attemptResponseWriter{ResponseWriter: w}
 	err, wrote, buffered := account.forwardSingle(ctx, tracked, request)
+	var rejection *safeAccountRetryError
+	if !wrote && errors.As(err, &rejection) && rejection.creditRejected {
+		buffered, err = rejection.response, nil
+	}
 	if recorder, ok := w.(RequestAttemptRecorder); ok {
 		status := tracked.status
 		if buffered != nil {
@@ -1018,14 +1035,19 @@ func (u *Upstream) rpmRetryAfter() time.Duration {
 func (u *Upstream) accountAvailable(account *Upstream) bool {
 	u.poolMu.Lock()
 	defer u.poolMu.Unlock()
-	return !u.cooldownUntil[account].After(time.Now())
+	return !u.accountCoolingLocked(account, time.Now())
+}
+
+func (u *Upstream) accountCoolingLocked(account *Upstream, now time.Time) bool {
+	until, exists := u.cooldownUntil[account]
+	return until.After(now) || (exists && normalizeCooldownReason(u.cooldownReason[account]) == cooldownReasonInsufficientCredits)
 }
 
 func (u *Upstream) cooldownUntilFor(account *Upstream) *time.Time {
 	u.poolMu.Lock()
 	until := u.cooldownUntil[account]
 	u.poolMu.Unlock()
-	if !until.After(time.Now()) {
+	if until.IsZero() || (!until.After(time.Now()) && u.cooldownReasonFor(account) != cooldownReasonInsufficientCredits) {
 		return nil
 	}
 	until = until.UTC()
@@ -1037,7 +1059,7 @@ func (u *Upstream) cooldownReasonFor(account *Upstream) string {
 	until := u.cooldownUntil[account]
 	reason := u.cooldownReason[account]
 	u.poolMu.Unlock()
-	if !until.After(time.Now()) {
+	if until.IsZero() || (!until.After(time.Now()) && normalizeCooldownReason(reason) != cooldownReasonInsufficientCredits) {
 		return ""
 	}
 	return normalizeCooldownReason(reason)
@@ -1082,23 +1104,59 @@ func (u *Upstream) clearCreditCooldown(account *Upstream) {
 	}
 }
 
-// CalibrateCreditCooldowns refreshes only accounts cooled down for credits.
-// Temporary bans remain untouched until their upstream end time.
+// CalibrateCreditCooldowns checks balances independently of the admin page.
 func (u *Upstream) CalibrateCreditCooldowns(ctx context.Context) {
+	u.recheckExpiredCreditCooldowns(ctx)
+}
+
+func (u *Upstream) recheckExpiredCreditCooldowns(ctx context.Context) {
+	accounts := u.accountsSnapshot()
 	if !u.poolMode {
-		if u.cooldownReasonFor(u) == cooldownReasonInsufficientCredits {
-			status := AccountStatus{ID: u.accountID, Identifier: u.cfg.Auth.Identifier, Enabled: u.enabled, RefreshedAt: time.Now()}
-			_ = u.refreshAccountStatus(ctx, status)
-		}
-		return
+		accounts = []*Upstream{u}
 	}
-	for _, account := range u.accountsSnapshot() {
-		if u.cooldownReasonFor(account) != cooldownReasonInsufficientCredits {
+	for _, account := range accounts {
+		if ctx.Err() != nil {
+			return
+		}
+		if !account.creditCheckMu.TryLock() {
 			continue
 		}
-		status := AccountStatus{ID: account.accountID, Identifier: account.cfg.Auth.Identifier, Enabled: account.enabled, RefreshedAt: time.Now()}
-		_ = account.refreshAccountStatus(ctx, status)
+		u.poolMu.Lock()
+		until, exists := u.cooldownUntil[account]
+		due := exists && !until.After(time.Now()) && normalizeCooldownReason(u.cooldownReason[account]) == cooldownReasonInsufficientCredits
+		u.poolMu.Unlock()
+		if due && (!u.poolMode || account.enabled) {
+			// Keep the account quarantined even if the balance endpoint fails.
+			u.coolDown(account)
+			account.refreshCreditBalance(ctx)
+		}
+		account.creditCheckMu.Unlock()
 	}
+}
+
+func (u *Upstream) refreshCreditBalance(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := u.ensureLogin(ctx); err != nil {
+		return
+	}
+	_, _ = u.checkinOnce(ctx, http.MethodGet, strings.TrimRight(u.cfg.Upstream.BaseURL, "/"), true)
+}
+
+func (u *Upstream) applyCreditBalance(balance int64) {
+	owner := u.restrictionOwner()
+	if balance > insufficientCreditsThreshold {
+		owner.clearCreditCooldown(u)
+	} else {
+		owner.coolDown(u)
+	}
+}
+
+func (u *Upstream) handleCreditRejection(ctx context.Context, account *Upstream) {
+	account.creditCheckMu.Lock()
+	defer account.creditCheckMu.Unlock()
+	u.coolDown(account)
+	account.refreshCreditBalance(ctx)
 }
 
 func normalizeCooldownReason(reason string) string {
@@ -1157,10 +1215,16 @@ func (u *Upstream) coolDownUntil(account *Upstream, until time.Time, reason stri
 	effectiveUntil := until
 	effectiveReason := reason
 	u.poolMu.Lock()
+	if u.cooldownUntil == nil {
+		u.cooldownUntil = make(map[*Upstream]time.Time)
+	}
+	if u.cooldownReason == nil {
+		u.cooldownReason = make(map[*Upstream]string)
+	}
 	if len(u.accounts) == 0 && account == u {
 		previous := u.cooldownUntil[account]
 		previousReason := u.cooldownReason[account]
-		if previousReason == "" && previous.After(time.Now()) {
+		if previousReason == "" || !previous.After(time.Now()) {
 			previousReason = cooldownReasonInsufficientCredits
 		}
 		if until.After(previous) {
@@ -1181,7 +1245,7 @@ func (u *Upstream) coolDownUntil(account *Upstream, until time.Time, reason stri
 		if current == account {
 			previous := u.cooldownUntil[account]
 			previousReason := u.cooldownReason[account]
-			if previousReason == "" {
+			if previousReason == "" || !previous.After(time.Now()) {
 				previousReason = cooldownReasonInsufficientCredits
 			}
 			if until.After(previous) {
@@ -1319,7 +1383,6 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return fmt.Errorf("read upstream body: %w", readErr), false, nil
 		}
-		admission.ReportUsage(ctx, body)
 		if restriction, ok := detectAccountRestriction(resp.StatusCode, body); ok {
 			return &safeAccountRetryError{
 				err:            fmt.Errorf("upstream account restricted: status=%d", resp.StatusCode),
@@ -1331,6 +1394,7 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		if insufficientCredits(resp.StatusCode, body) {
 			return nil, false, &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: body}
 		}
+		admission.ReportUsage(ctx, body)
 		if retryableUpstreamStatus(resp.StatusCode) {
 			if resp.StatusCode == http.StatusTooManyRequests {
 				u.recordModelCooldown(request.Model, resp.Header.Get("Retry-After"))
@@ -1361,9 +1425,11 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 		return nil, true, nil
 	}
 
-	resp.Body = &usageBody{ReadCloser: resp.Body, ctx: ctx}
+	streamUsage := &usageBody{ReadCloser: resp.Body, ctx: ctx}
+	resp.Body = streamUsage
 	reader := bufio.NewReader(resp.Body)
 	if resp.StatusCode == http.StatusPaymentRequired {
+		streamUsage.discard = true
 		body, readErr := readResponse(reader)
 		_ = resp.Body.Close()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -1388,6 +1454,15 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 			cooldownUntil: restriction.cooldownUntil, disableAccount: restriction.disableAccount,
 		}, false, nil
 	}
+	if insufficientCredits(resp.StatusCode, prefix) {
+		streamUsage.discard = true
+		body, readErr := readResponse(reader)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return readErr, false, nil
+		}
+		return nil, false, &bufferedResponse{header: resp.Header.Clone(), status: resp.StatusCode, body: append(prefix, body...)}
+	}
 	if retryableUpstreamStatus(resp.StatusCode) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			u.recordModelCooldown(request.Model, resp.Header.Get("Retry-After"))
@@ -1404,17 +1479,6 @@ func (u *Upstream) forwardSingle(ctx context.Context, w http.ResponseWriter, req
 				body: append(prefix, body...),
 			},
 		}, false, nil
-	}
-	if insufficientCredits(resp.StatusCode, prefix) {
-		body, readErr := readResponse(reader)
-		_ = resp.Body.Close()
-		if readErr != nil {
-			return readErr, false, nil
-		}
-		return nil, false, &bufferedResponse{
-			header: resp.Header.Clone(), status: resp.StatusCode,
-			body: append(prefix, body...),
-		}
 	}
 	httpx.CopyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -1464,6 +1528,21 @@ func readSSEPrefix(reader *bufio.Reader) ([]byte, error) {
 func insufficientCredits(status int, body []byte) bool {
 	if status == http.StatusPaymentRequired {
 		return true
+	}
+	if status >= 200 && status < 300 {
+		payload := bytes.TrimSpace(body)
+		for _, line := range bytes.Split(payload, []byte("\n")) {
+			if bytes.HasPrefix(line, []byte("data:")) {
+				payload = bytes.TrimSpace(line[5:])
+				break
+			}
+		}
+		var envelope struct {
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(payload, &envelope) != nil || len(envelope.Error) == 0 || string(envelope.Error) == "null" {
+			return false
+		}
 	}
 	message := strings.ToLower(string(body))
 	for _, marker := range []string{
@@ -1654,9 +1733,6 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 				checkinErrors = append(checkinErrors, fmt.Errorf("account %d: %w", i+1, err))
 				continue
 			}
-			if account.owner != nil {
-				account.owner.clearCreditCooldown(account)
-			}
 			if !gotResult {
 				result = accountResult
 				gotResult = true
@@ -1688,7 +1764,6 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 	}
 	if state.CheckedIn {
 		state.AlreadyChecked = true
-		u.clearCreditCooldown(u)
 		return state, nil
 	}
 	if !state.Enabled {
@@ -1710,7 +1785,6 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 	if !fresh.CheckedIn && fresh.Reward == 0 {
 		return fresh, fmt.Errorf("checkin returned no reward")
 	}
-	u.clearCreditCooldown(u)
 	return fresh, nil
 }
 
@@ -1734,9 +1808,6 @@ func (u *Upstream) CheckinAccount(ctx context.Context, accountID string) (Checki
 			return CheckinResult{}, errors.New("账号已停用")
 		}
 		result, err := account.Checkin(ctx)
-		if err == nil {
-			u.restrictionOwner().clearCreditCooldown(account)
-		}
 		return result, err
 	}
 	return CheckinResult{}, errors.New("账号不存在")
@@ -1833,6 +1904,9 @@ func (u *Upstream) checkinOnce(ctx context.Context, method, host string, withMon
 		res.Balance = *balance
 	}
 	res.BalanceKnown = balance != nil
+	if res.BalanceKnown {
+		u.applyCreditBalance(res.Balance)
+	}
 	return res, nil
 }
 

@@ -170,15 +170,25 @@ func validKind(kind string) bool {
 	return kind == "checkin" || kind == "redeem" || kind == "refresh" || kind == "probe"
 }
 func (s *Store) Submit(ctx context.Context, kind string, targets []string, params any) (Job, bool, error) {
-	return s.submit(ctx, kind, targets, params, "")
+	return s.submit(ctx, kind, targets, params, "", "")
 }
 func (s *Store) SubmitScheduled(ctx context.Context, kind string, targets []string, params any, date string) (Job, bool, error) {
+	return s.SubmitScheduledRearmed(ctx, kind, targets, params, date, time.Time{})
+}
+
+// SubmitScheduledRearmed permits another daily attempt only for an explicitly
+// saved future execution time. Code/target edits retain the daily receipt.
+func (s *Store) SubmitScheduledRearmed(ctx context.Context, kind string, targets []string, params any, date string, rearm time.Time) (Job, bool, error) {
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		return Job{}, false, err
 	}
-	return s.submit(ctx, kind, targets, params, date)
+	suffix := ""
+	if !rearm.IsZero() {
+		suffix = "/" + rearm.UTC().Format(time.RFC3339)
+	}
+	return s.submit(ctx, kind, targets, params, date, suffix)
 }
-func (s *Store) submit(ctx context.Context, kind string, targets []string, params any, date string) (Job, bool, error) {
+func (s *Store) submit(ctx context.Context, kind string, targets []string, params any, date, scheduleSuffix string) (Job, bool, error) {
 	if !validKind(kind) || len(targets) == 0 || len(targets) > 100 {
 		return Job{}, false, errors.New("invalid job kind or targets")
 	}
@@ -206,15 +216,14 @@ func (s *Store) submit(ctx context.Context, kind string, targets []string, param
 	now := time.Now().UTC()
 	job := savedJob{Job: Job{ID: "job_" + hex.EncodeToString(random[:]), Kind: kind, State: "queued", CreatedAt: now, UpdatedAt: now}, Params: encoded, Dedupe: dedupe}
 	if date != "" {
-		// One automatic attempt per task kind and date, even after settings change.
-		job.Schedule = date + "/" + kind
+		job.Schedule = date + "/" + kind + scheduleSuffix
 	}
 	for _, id := range targets {
 		job.Items = append(job.Items, Item{Target: id, State: "queued"})
 	}
 	duplicate := false
 	err = s.mutate(ctx, func(v *state) error {
-		if kind == "redeem" && date != "" && v.LegacyRedemptionDate == date {
+		if kind == "redeem" && date != "" && scheduleSuffix == "" && v.LegacyRedemptionDate == date {
 			job.Job.State, duplicate = "interrupted", true
 			for i := range job.Items {
 				job.Items[i].State, job.Items[i].Error = "interrupted", "legacy_attempt_recorded"
@@ -244,6 +253,10 @@ func (s *Store) submit(ctx context.Context, kind string, targets []string, param
 			if active(old.State) {
 				pending++
 				if old.Dedupe == dedupe {
+					if job.Schedule != "" {
+						v.ScheduleReceipts[job.Schedule] = now.Add(48 * time.Hour)
+						v.ScheduleReceipts[date+"/"+kind] = now.Add(48 * time.Hour)
+					}
 					job = old
 					duplicate = true
 					return nil
@@ -264,6 +277,7 @@ func (s *Store) submit(ctx context.Context, kind string, targets []string, param
 		v.Jobs = append(v.Jobs, job)
 		if job.Schedule != "" {
 			v.ScheduleReceipts[job.Schedule] = time.Now().Add(48 * time.Hour)
+			v.ScheduleReceipts[date+"/"+kind] = time.Now().Add(48 * time.Hour)
 		}
 		return nil
 	})

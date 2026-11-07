@@ -8,7 +8,7 @@ const { chromium } = require("playwright-core");
 let fixture, browser, base;
 const failures = [];
 
-test("shared admission settings, request quota and persistent job UI", async () => {
+test("shared admission settings, request quota and background account actions", async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   page.on("pageerror", error => failures.push(error.message));
@@ -67,11 +67,19 @@ test("shared admission settings, request quota and persistent job UI", async () 
   const key = (await (await context.request.get(base + "/admin/api/keys")).json()).keys.find(item => item.name === "Quota browser key");
   await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
   await page.locator("#accounts-tab").click();
+  const submitted = page.waitForResponse(response => response.url().endsWith("/admin/api/jobs") && response.request().method() === "POST");
   await page.locator("#checkin-all-button").click();
-  await page.waitForFunction(() => document.querySelectorAll("#jobs-panel .job-row").length > 0);
+  const created = await (await submitted).json();
+  assert.equal(created.job.kind, "checkin");
+  await page.waitForFunction(async id => {
+    const response = await fetch("/admin/api/jobs");
+    const result = await response.json();
+    return result.jobs.some(job => job.id === id && !["queued", "running"].includes(job.state));
+  }, created.job.id);
+  assert.equal(await page.locator("#jobs-panel").count(), 0);
   await page.reload();
   await page.locator("#dashboard").waitFor({ state: "visible" });
-  await page.waitForFunction(() => document.querySelectorAll("#jobs-panel .job-row").length > 0);
+  assert.equal(await page.locator("#jobs-panel").count(), 0);
   const jobs = (await (await context.request.get(base + "/admin/api/jobs")).json()).jobs;
   assert.ok(jobs.some(job => job.kind === "checkin"));
   for (const width of [1440, 768, 390, 320]) {

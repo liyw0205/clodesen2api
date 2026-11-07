@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"clodesen2api/internal/controlstore"
 	"github.com/lfhy/flag"
@@ -95,6 +96,7 @@ type settingsDocument struct {
 	Schema                 int                        `json:"schema"`
 	Values                 map[string]json.RawMessage `json:"values"`
 	LegacyStrategyImported bool                       `json:"legacyStrategyImported,omitempty"`
+	ScheduleRearms         map[string]time.Time       `json:"scheduleRearms,omitempty"`
 }
 
 func (s *SettingsStore) ImportLegacyStrategy(ctx context.Context, strategy string) error {
@@ -211,6 +213,7 @@ func (s *SettingsStore) snapshot(ctx context.Context) (Config, settingsDocument,
 		}
 	}
 	effective, err := applyValues(s.base, values)
+	effective.ScheduleRearms = doc.ScheduleRearms
 	return effective, doc, revision, err
 }
 
@@ -278,6 +281,31 @@ func (s *SettingsStore) Save(ctx context.Context, settings PublicSettings) (Publ
 		}
 		doc.Values[path] = value
 	}
+	if doc.ScheduleRearms == nil {
+		doc.ScheduleRearms = map[string]time.Time{}
+	}
+	now := time.Now()
+	rearm := func(kind, oldAt, at, tz string) {
+		if oldAt == at {
+			return
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return
+		}
+		hm, err := time.Parse("15:04", at)
+		if err != nil {
+			return
+		}
+		local := now.In(loc)
+		target := time.Date(local.Year(), local.Month(), local.Day(), hm.Hour(), hm.Minute(), 0, 0, loc)
+		delete(doc.ScheduleRearms, kind)
+		if target.After(now) {
+			doc.ScheduleRearms[kind] = target.UTC()
+		}
+	}
+	rearm("checkin", current.Checkin.At, candidate.Checkin.At, candidate.Checkin.Timezone)
+	rearm("redeem", current.Redemption.At, candidate.Redemption.At, "Asia/Shanghai")
 	if _, err := s.db.Save(ctx, "settings", revision, doc); err != nil {
 		return PublicSettings{}, Config{}, err
 	}
@@ -305,6 +333,7 @@ func (s *SettingsStore) viewAfter(ctx context.Context) (PublicSettings, Config, 
 	if err != nil {
 		return PublicSettings{}, Config{}, err
 	}
+	hot.ScheduleRearms = effective.ScheduleRearms
 	s.running = hot
 	view, err := s.view(ctx)
 	return view, hot, err

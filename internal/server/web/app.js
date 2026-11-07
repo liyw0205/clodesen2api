@@ -1019,13 +1019,14 @@
     const cooldownUntil = account.cooldownUntil ? new Date(account.cooldownUntil) : null;
     if (!account.enabled) return { text: "已停用", className: "status-paused" };
     if (cooldownUntil && cooldownUntil > new Date()) return { text: cooldownLabel(account) + "，冷却至 " + formatTime(account.cooldownUntil), className: "status-cooldown" };
+    if (creditRecheckPending(account)) return { text: "等待积分复查", className: "status-cooldown" };
     if (account.error) return { text: "状态异常", className: "status-error" };
     return { text: "可用", className: "status-ready" };
   }
 
   function render() {
     const enabled = state.accounts.filter(account => account.enabled);
-    const cooling = enabled.filter(account => account.cooldownUntil && new Date(account.cooldownUntil) > new Date());
+    const cooling = enabled.filter(account => (account.cooldownUntil && new Date(account.cooldownUntil) > new Date()) || creditRecheckPending(account));
     const missingBalance = state.accounts.some(account => account.enabled && !hasNumber(account.balance));
     const totalNode = $("#available-credits");
     totalNode.textContent = state.availableCredits === null ? "--" : formatNumber(state.availableCredits);
@@ -1070,9 +1071,14 @@
     return account.cooldownReason === "temporary_ban" ? "临时封禁" : "积分不足";
   }
 
+  function creditRecheckPending(account) {
+    return Boolean(account.cooldownUntil && account.cooldownReason !== "temporary_ban" && new Date(account.cooldownUntil) <= new Date());
+  }
+
   function accountDetail(account) {
     const cooldownUntil = account.cooldownUntil ? new Date(account.cooldownUntil) : null;
     if (cooldownUntil && cooldownUntil > new Date()) return cooldownLabel(account) + "，冷却至 " + formatTime(account.cooldownUntil);
+    if (creditRecheckPending(account)) return "等待积分复查";
     if (account.error) return account.error;
     if (account.redemptionResetAt || account.resetAt) return "兑换码额度重置 " + formatChinaTime(account.redemptionResetAt || account.resetAt);
     return "更新于 " + formatTime(account.refreshedAt);
@@ -1640,7 +1646,7 @@
   const modelPolicies = window.createModelPolicies({ api, element, showToast, render: renderModels });
   const admissionControl = window.createAdmission({ api, element });
   const storageManagement = window.createStorage({ api, element, formatTime });
-  const jobManagement = window.createJobs({ api, element, formatTime, showToast, onComplete: () => { void refresh(false, true); void loadRedemptionHistory(); } });
+  const jobManagement = window.createJobs({ api, showToast, onComplete: () => { void refresh(false, true); void loadRedemptionHistory(); } });
   const keyManagement = window.createKeyManagement({ api, element, formatTime, formatNumber, showToast, openRecords: id => {
     state.requestRecordFilters = { model: "", account: "", type: "", status: "", key: id };
     state.requestRecordsPage = 1;

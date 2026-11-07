@@ -36,6 +36,29 @@ func TestQueueCapacityAndDailyScheduleChanges(t *testing.T) {
 	}
 }
 
+func TestScheduledReceiptWhenSharingManualJob(t *testing.T) {
+	s, _ := setup(t)
+	ctx := context.Background()
+	manual, _, err := s.Submit(ctx, "checkin", []string{"a"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	date := time.Now().Format("2006-01-02")
+	job, duplicate, err := s.SubmitScheduled(ctx, "checkin", []string{"a"}, nil, date)
+	if err != nil || !duplicate || job.ID != manual.ID {
+		t.Fatalf("manual dedupe: %+v %t %v", job, duplicate, err)
+	}
+	if err := s.Cancel(ctx, manual.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.mutate(ctx, func(v *state) error { v.Jobs = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := s.SubmitScheduled(ctx, "checkin", []string{"a"}, nil, date); err != nil || !duplicate {
+		t.Fatalf("shared attempt replayed after pruning: %t %v", duplicate, err)
+	}
+}
+
 func setup(t *testing.T) (*Store, *controlstore.Store) {
 	t.Helper()
 	db, err := controlstore.Open(filepath.Join(t.TempDir(), "c.sqlite3"))
