@@ -99,6 +99,10 @@ test("sidebar adapts across screens and supports dismissal, keyboard focus and s
     await toggle.click(); await page.goBack();
     assert.equal(await sidebar.isVisible(), false);
     await toggle.click(); await page.setViewportSize({ width: 1024, height: 844 });
+    await page.waitForFunction(() => {
+      const sidebar = document.querySelector("#workspace-sidebar");
+      return !sidebar.hasAttribute("aria-modal") && !sidebar.inert && !document.querySelector(".app-column").inert && sidebar.contains(document.activeElement);
+    });
     assert.equal(await sidebar.isVisible(), true); assert.equal(await sidebar.getAttribute("aria-modal"), null);
     assert.equal(await page.locator(".app-column").evaluate(node => node.inert), false);
     await page.setViewportSize({ width: 568, height: 320 });
