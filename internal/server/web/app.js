@@ -9,6 +9,7 @@
     strategy: "fixed",
     deletingID: "",
     toastTimer: 0,
+    redemptionProgressJobId: "",
     availableCredits: null,
     consumedCredits: null,
     accountsRefreshedAt: null,
@@ -1483,7 +1484,6 @@
     $("#redeem-form-error").textContent = "";
     try {
       await jobManagement.submit("redeem", ids, code);
-      redeemDialog.close();
     } catch (error) {
       $("#redeem-form-error").textContent = error.message;
     } finally {
@@ -1492,45 +1492,44 @@
     }
   }
 
-  function showResults(result) {
-    if (Array.isArray(result.items)) {
-      const results = result.items.map(item => {
-        let payload = {};
-        try { payload = typeof item.result === "string" ? JSON.parse(item.result) : (item.result || {}); } catch (_) {}
-        const status = payload.status || (item.state === "succeeded" ? "success" : "error");
-        const account = state.accounts.find(candidate => candidate.id === item.target);
-        return {
-          account: payload.account || payload.identifier || account?.identifier || item.target || "账号",
-          status,
-          message: payload.message || (item.error === "operation_failed" ? "兑换失败" : item.error || status),
-          credits: payload.credits,
-        };
-      });
-      let totalCredits = 0;
-      for (const item of results) if (item.status === "success" && Number.isFinite(Number(item.credits))) totalCredits += Number(item.credits);
-      result = {
-        results,
-        successCount: results.filter(item => item.status === "success").length,
-        totalCount: results.length,
-        totalCredits,
+  function updateRedemptionProgress(job) {
+    if (!job || job.id !== state.redemptionProgressJobId) return;
+    const items = Array.isArray(job.items) ? job.items : [];
+    const results = items.map(item => {
+      let payload = {};
+      try { payload = typeof item.result === "string" ? JSON.parse(item.result) : (item.result || {}); } catch (_) {}
+      const account = state.accounts.find(candidate => candidate.id === item.target);
+      const stateLabel = ({ queued: "等待兑换", running: "正在兑换", succeeded: "兑换成功", failed: "兑换失败", cancelled: "已取消", interrupted: "结果待确认" })[item.state] || "等待兑换";
+      const message = payload.message || (item.error === "operation_failed" ? "兑换失败" : item.error || stateLabel);
+      return {
+        account: payload.account || payload.identifier || account?.identifier || item.target || "账号",
+        state: item.state,
+        status: item.state === "succeeded" ? (payload.status || "success") : item.state,
+        message: item.state === "succeeded" ? message : stateLabel === message ? stateLabel : stateLabel + " · " + message,
+        credits: payload.credits,
       };
-    }
-    const successCount = Number(result.successCount) || 0;
-    const totalCount = Number(result.totalCount) || 0;
-    $("#result-title").textContent = successCount === totalCount && totalCount > 0 ? "兑换完成" : successCount > 0 ? "兑换部分完成" : "兑换未完成";
-    $("#result-summary").textContent = "成功 " + formatNumber(successCount) + " / " + formatNumber(totalCount) +
-      " 个账号，到账 " + formatNumber(result.totalCredits) + " 积分。失败账号不会自动重试。";
+    });
+    const successCount = results.filter(item => item.state === "succeeded").length;
+    const finishedCount = results.filter(item => ["succeeded", "failed", "cancelled", "interrupted"].includes(item.state)).length;
+    let totalCredits = 0;
+    for (const item of results) if (item.state === "succeeded" && Number.isFinite(Number(item.credits))) totalCredits += Number(item.credits);
+    const totalCount = results.length;
+    const complete = !["queued", "running"].includes(job.state);
+    $("#result-title").textContent = !complete ? "兑换处理中" : successCount === totalCount && totalCount > 0 ? "兑换完成" : successCount > 0 ? "兑换部分完成" : "兑换未完成";
+    $("#result-close").textContent = complete ? "完成" : "后台继续";
+    $("#result-summary").textContent = complete ? "成功 " + formatNumber(successCount) + " / " + formatNumber(totalCount) +
+      " 个账号，到账 " + formatNumber(totalCredits) + " 积分。失败账号不会自动重试。" : "已完成 " + formatNumber(finishedCount) + " / " + formatNumber(totalCount) +
+      " 个账号，成功 " + formatNumber(successCount) + " 个，到账 " + formatNumber(totalCredits) + " 积分。";
     const list = $("#result-list");
     list.replaceChildren();
-    for (const item of result.results || []) {
+    for (const item of results) {
       const row = element("li");
       const name = element("span", "", item.account || "账号");
-      const details = element("span", item.status === "success" ? "result-success" : "result-error", item.message || item.status);
+      const statusClass = item.state === "succeeded" ? "result-success" : ["failed", "cancelled", "interrupted"].includes(item.state) ? "result-error" : "result-pending";
+      const details = element("span", statusClass, item.message || item.status);
       row.append(name, details);
       list.append(row);
     }
-    if (resultDialog.open) resultDialog.close();
-    resultDialog.showModal();
   }
 
   function handleAccountAction(event) {
@@ -1714,10 +1713,15 @@
   const modelPolicies = window.createModelPolicies({ api, element, showToast, render: renderModels });
   const admissionControl = window.createAdmission({ api, element });
   const storageManagement = window.createStorage({ api, element, formatTime });
-  const jobManagement = window.createJobs({ api, showToast, onComplete: jobs => {
+  const jobManagement = window.createJobs({ api, showToast, onSubmitted: job => {
+    if (job.kind !== "redeem") return;
+    state.redemptionProgressJobId = job.id;
+    redeemDialog.close();
+    updateRedemptionProgress(job);
+    resultDialog.showModal();
+  }, onUpdate: updateRedemptionProgress, onComplete: () => {
     void refresh(false, true);
     void loadRedemptionHistory();
-    for (const job of jobs || []) if (job.kind === "redeem") showResults(job);
   } });
   const keyManagement = window.createKeyManagement({ api, element, formatTime, formatNumber, showToast, openRecords: id => {
     state.requestRecordFilters = { model: "", account: "", type: "", status: "", key: id };

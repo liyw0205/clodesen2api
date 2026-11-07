@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  window.createJobs = ({ api, showToast, onComplete }) => {
+  window.createJobs = ({ api, showToast, onSubmitted, onUpdate, onComplete }) => {
     let generation = 0, timer = null, loading = false, previous = new Map();
     const submitted = new Map();
     const active = job => ["queued", "running"].includes(job.state);
@@ -15,6 +15,7 @@
         let completed = false;
         const completedJobs = [];
         for (const job of jobs) {
+          if (submitted.has(job.id) && onUpdate) onUpdate(job);
           if (active(job)) { poll = true; continue; }
           if (previous.get(job.id) || submitted.has(job.id)) completed = true;
           if (submitted.has(job.id)) {
@@ -41,7 +42,10 @@
       const result = await api("/admin/api/jobs", { method: "POST", body: JSON.stringify({ kind, accountIds, code }) });
       if (epoch !== generation) return;
       submitted.set(result.job.id, kind);
-      showToast(kind === "redeem" ? "兑换处理中，完成后显示结果" : (kinds[kind] || "操作") + "已提交"); await load();
+      if (onSubmitted) onSubmitted(result.job);
+      if (kind !== "redeem") showToast((kinds[kind] || "操作") + "已提交");
+      await load();
+      return result.job;
     }
     return { load, submit, clear() { generation++; window.clearTimeout(timer); timer = null; loading = false; previous.clear(); submitted.clear(); } };
   };

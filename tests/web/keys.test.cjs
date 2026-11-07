@@ -82,10 +82,45 @@ test("shared admission settings, request quota and background account actions", 
   await page.locator("#redeem-open").click();
   await page.locator("#redemption-code").fill("test-code");
   await page.locator("#select-enabled").click();
+  let redemptionStarted = false;
+  let redemptionPolls = 0;
+  let releaseFirstRedemptionPoll;
+  let signalFirstRedemptionPoll;
+  const firstRedemptionPollStarted = new Promise(resolve => { signalFirstRedemptionPoll = resolve; });
+  const holdFirstRedemptionPoll = new Promise(resolve => { releaseFirstRedemptionPoll = resolve; });
+  await page.route("**/admin/api/jobs", async route => {
+    if (!redemptionStarted) return route.continue();
+    if (route.request().method() === "POST") {
+      await route.fulfill({ status: 202, contentType: "application/json", body: JSON.stringify({ job: { id: "redemption-progress-test", kind: "redeem", state: "queued", items: [{ target: "fixture", state: "queued" }, { target: "fixture-2", state: "queued" }] } }) });
+      return;
+    }
+    redemptionPolls += 1;
+    if (redemptionPolls === 1) {
+      signalFirstRedemptionPoll();
+      await holdFirstRedemptionPoll;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [{ id: "redemption-progress-test", kind: "redeem", state: "running", items: [
+        { target: "fixture", state: "succeeded", result: { account: "fixture@example.test", status: "success", message: "到账 500 积分", credits: 500 } },
+        { target: "fixture-2", state: "running" },
+      ] }] }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [{ id: "redemption-progress-test", kind: "redeem", state: "succeeded", items: [
+      { target: "fixture", state: "succeeded", result: { account: "fixture@example.test", status: "success", message: "到账 500 积分", credits: 500 } },
+      { target: "fixture-2", state: "succeeded", result: { account: "second@example.test", status: "success", message: "到账 600 积分", credits: 600 } },
+    ] }] }) });
+  });
+  redemptionStarted = true;
   await page.locator("#redeem-submit").click();
   await page.locator("#result-dialog").waitFor({ state: "visible" });
-  assert.match(await page.locator("#result-summary").textContent(), /成功 1 \/ 1 个账号/);
-  assert.match(await page.locator("#result-list").textContent(), /到账 500 积分/);
+  assert.equal(await page.locator("#result-title").textContent(), "兑换处理中");
+  assert.match(await page.locator("#result-list").textContent(), /等待兑换/);
+  await firstRedemptionPollStarted;
+  releaseFirstRedemptionPoll();
+  await page.waitForFunction(() => document.querySelector("#result-summary").textContent.includes("成功 1 个"));
+  assert.match(await page.locator("#result-summary").textContent(), /已完成 1 \/ 2 个账号/);
+  assert.match(await page.locator("#result-list").textContent(), /到账 500 积分.*正在兑换/);
+  await page.waitForFunction(() => document.querySelector("#result-summary").textContent.includes("成功 2 \/ 2 个账号"));
+  assert.match(await page.locator("#result-list").textContent(), /到账 600 积分/);
   await page.locator("[data-close='result-dialog']").last().click();
   assert.equal(await page.locator("#jobs-panel").count(), 0);
   await page.reload();
