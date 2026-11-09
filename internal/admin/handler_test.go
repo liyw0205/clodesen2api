@@ -24,6 +24,7 @@ const testSetupToken = "setup-token-123"
 
 func newAdminTestServer(t *testing.T) (*httptest.Server, *AccountStore, *upstream.Upstream, *usage.Collector) {
 	t.Helper()
+	transactionTime := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		encoder := json.NewEncoder(w)
@@ -41,7 +42,7 @@ func newAdminTestServer(t *testing.T) (*httptest.Server, *AccountStore, *upstrea
 			}})
 		case "/api/account":
 			_ = encoder.Encode(map[string]any{"account": map[string]any{"transactions": []map[string]any{
-				{"id": 17, "amount": -60, "balance_after": 1174, "type": "model_usage", "description": "模型请求：gpt-5.6", "status": "completed", "created_at": "2026-11-02T05:00:00Z"},
+				{"id": 17, "amount": -60, "balance_after": 1174, "type": "model_usage", "description": "模型请求：gpt-5.6", "status": "completed", "created_at": transactionTime},
 			}}})
 		case "/api/limited-redemption":
 			if r.Method == http.MethodGet {
