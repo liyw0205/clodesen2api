@@ -13,6 +13,27 @@ import (
 	"clodesen2api/internal/controlstore"
 )
 
+func TestResponsesUsageAcceptsOnlyTerminalIntegerCounts(t *testing.T) {
+	for _, test := range []struct {
+		body string
+		want Amount
+	}{
+		{`{"type":"response.completed","response":{"usage":{"total_tokens":20,"credits":3}}}`, Amount{Tokens: 20, Credits: 3, TokensKnown: true, CreditsKnown: true}},
+		{`{"type":"response.incomplete","response":{"usage":{"total_tokens":0}}}`, Amount{TokensKnown: true}},
+		{`{"type":"response.failed","response":{"usage":{"credits":3}}}`, Amount{Credits: 3, CreditsKnown: true}},
+		{`{"type":"response.created","response":{"usage":{"total_tokens":20,"credits":3}}}`, Amount{}},
+		{`{"type":"response.completed","response":{"usage":{"total_tokens":-1,"credits":-1}}}`, Amount{}},
+		{`{"type":"response.completed","response":{"usage":{"total_tokens":2.5,"credits":3}}}`, Amount{}},
+		{`{"type":"response.completed","response":{"usage":null}}`, Amount{}},
+	} {
+		var got Amount
+		ReportUsage(WithMeter(context.Background(), func(amount Amount) { got = amount }), []byte(test.body))
+		if got != test.want {
+			t.Fatalf("%s: got %+v, want %+v", test.body, got, test.want)
+		}
+	}
+}
+
 func TestBackupAdmissionValidationChecksUnprunedState(t *testing.T) {
 	for _, field := range []string{"settings", "reservation-state", "expired-negative-balance"} {
 		t.Run(field, func(t *testing.T) {

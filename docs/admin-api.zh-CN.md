@@ -64,6 +64,27 @@
 | `/alerts/test` | POST | 用当前草稿配置测试一个渠道，不持久化草稿 |
 | `/update` | GET/PUT/PATCH/POST | 检查版本 / 保存下载源 / 测速 / 安装更新 |
 
+## 调用测试与客户端接口
+
+模型与统计页的“调用测试台”和模型行的“测试”使用已登录的管理会话，无需填写或创建 API Key。管理专用端点为 `POST /admin/api/playground/chat/completions`、`/admin/api/playground/responses`、`/admin/api/playground/images/generations` 和 `/admin/api/playground/images/edits`，请求格式与下表对应客户端接口相同，须通过管理会话和同源检查。对外 `/v1/*` 仍需客户端 API 密钥，管理 Cookie 不能代替该密钥。每次发送需要确认积分消耗；关闭、Escape 或退出登录会取消请求并清空原图和结果。取消不代表上游未计费。
+
+管理测试复用模型策略、映射、全局并发、账号路由和审计链路，记录身份为 `admin-playground` / 管理测试台，不占用客户端密钥配额。未登录返回 401，响应含 `code: admin_session_expired`，供界面区分会话过期与上游 401；不支持的方法返回 405，未列出的测试路径返回 404。
+
+模型列表仅在按次计费模型的“测试”按钮旁显示预计可调用次数。以最终上游模型的单次积分价格计算，各可用账号分别取 `floor(max(余额, 0) / 单价)` 后相加，排除停用、异常、账号冷却、积分待复查及对应模型冷却账号。未知余额、缺失或零单价、冷却存储降级时显示 `--`；按用量计费模型不显示次数。刷新模型页、刷新账号和结束测试后更新估算，结果依赖当前余额快照，不保证实际调用次数。
+
+| 类型 | 路径 | 请求 |
+| --- | --- | --- |
+| Chat | `POST /v1/chat/completions` | JSON `{model,messages,stream}`，支持 JSON / SSE |
+| Responses | `POST /v1/responses` | JSON `{model,input,stream}`，支持 JSON / SSE |
+| 文生图 | `POST /v1/images/generations` | JSON `{model,prompt,size}`，返回图片 |
+| 图生图 | `POST /v1/images/edits` | multipart 的 model、prompt、size、image / image[]；也支持 JSON data URL |
+
+Responses 原样转发 JSON 参数，上游与模型需支持该协议；与其他调用共用鉴权、模型白名单、公开名称映射、并发、配额和审计。模型策略的 `endpoints` 可包含表中四个路径；空列表代表能力未知，明确列表之外的接口被拒绝。Chat 与 Responses 的 JSON 请求上限均为 20 MiB。Responses 的 input、instructions 不写入请求参数审计。
+
+图生图支持 PNG/JPEG/WebP，最多 10 张，每张不超过 20 MiB；前后端均验证图片类型和大小。测试台可预览、移除原图，设置图片尺寸，查看图片结果并下载。
+
+测试台的 Chat 和 Responses 默认开启流式输出，首段内容抵达时即可展示，支持关闭流式。用 Chat 的 `[DONE]` 和 Responses 的 `response.completed` 分别判定流式完成；Responses 的 failed、incomplete 或缺少结束事件均展示错误并保留已收到文本。界面展示上游返回的 Token / 积分用量；客户端硬配额只按已验证的整数 usage 合同结算，支持 Responses 终止事件中的 `response.usage`，缺失用量仍保留预留额。
+
 ## 筛选与报表
 
 `/request-records` 参数为 `model,account,type,status,key,page,pageSize`。model/account 为不区分大小写的子串；key 精确匹配 ID。pageSize 为 1 到 100；越界页截断到最后一页。状态为 normal、upstream_error、abnormal、running、interrupted。筛选汇总与列表读取同一事务，账号选项来自保留明细。

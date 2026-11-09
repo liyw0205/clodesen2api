@@ -146,6 +146,30 @@ func TestBuildChatCompletionRequestRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildResponsesRequestPreservesPayloadAndOmitsPrivateInputs(t *testing.T) {
+	body := `{"model":"model","input":[{"role":"user","content":"private input"}],"instructions":"private instructions","stream":true,"reasoning":{"effort":"high"},"max_output_tokens":512,"tools":[{"type":"web_search"}]}`
+	r := httptest.NewRequest(http.MethodPost, ResponsesPath+"?ignored=true", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	request, err := BuildRequest(httptest.NewRecorder(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Path != ResponsesPath || string(request.Body) != body || request.Model != "model" || !request.Stream || request.ThinkingLevel != "high" {
+		t.Fatalf("incorrect Responses request: %+v", request)
+	}
+	parameters, _ := json.Marshal(request.Parameters)
+	if bytes.Contains(parameters, []byte("private")) || request.Parameters["max_output_tokens"] != float64(512) || request.Parameters["tool_count"] != 1 {
+		t.Fatalf("incorrect safe metadata: %s", parameters)
+	}
+	for _, body := range []string{`null`, `[]`, `{"input":"x"} {}`} {
+		r := httptest.NewRequest(http.MethodPost, ResponsesPath, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		if _, err := BuildRequest(httptest.NewRecorder(), r); err == nil {
+			t.Fatalf("accepted invalid body: %s", body)
+		}
+	}
+}
+
 func TestBuildEditRequestRebuildsMultipartAndSupportsTenImages(t *testing.T) {
 	incoming := newEditInput(t, maxImageCount)
 

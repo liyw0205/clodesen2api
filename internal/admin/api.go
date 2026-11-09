@@ -7,6 +7,8 @@ import (
 
 func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == "/admin/api/playground/chat/completions" || r.URL.Path == "/admin/api/playground/responses" || r.URL.Path == "/admin/api/playground/images/generations" || r.URL.Path == "/admin/api/playground/images/edits":
+		s.playgroundRoute(w, r)
 	case r.URL.Path == "/admin/api/alerts/test":
 		s.testAlertChannel(w, r)
 	case r.URL.Path == "/admin/api/alerts":
@@ -112,4 +114,23 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "管理接口不存在")
 	}
+}
+
+func (s *Service) playgroundRoute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, "方法不支持")
+		return
+	}
+	s.mu.Lock()
+	handler := s.playground
+	s.mu.Unlock()
+	if handler == nil {
+		writeError(w, http.StatusServiceUnavailable, "调用测试不可用")
+		return
+	}
+	request := r.Clone(r.Context())
+	request.URL.Path = "/v1" + strings.TrimPrefix(r.URL.Path, "/admin/api/playground")
+	request.URL.RawPath = ""
+	handler.ServeHTTP(w, request)
 }

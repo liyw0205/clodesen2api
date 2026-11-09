@@ -311,7 +311,7 @@ func validate(value saved) error {
 		if err := claim(rule.PublicID, source); err != nil {
 			return err
 		}
-		if len(rule.Endpoints) > 3 {
+		if len(rule.Endpoints) > 4 {
 			return errors.New("too many endpoint capabilities")
 		}
 		seen := map[string]bool{}
@@ -321,7 +321,7 @@ func validate(value saved) error {
 			}
 			seen[endpoint] = true
 			switch endpoint {
-			case openai.ChatCompletionsPath, openai.GenerationsPath, openai.EditsPath:
+			case openai.ChatCompletionsPath, openai.ResponsesPath, openai.GenerationsPath, openai.EditsPath:
 			default:
 				return errors.New("unsupported endpoint capability")
 			}

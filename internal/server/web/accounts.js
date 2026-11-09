@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  window.createAccounts = ({ $, api, state, element, formatNumber, formatTime, formatChinaTime, hasNumber, showToast, routingTools, visibleAccounts, updateTools, submitJob }) => {
+  window.createAccounts = ({ $, api, state, element, formatNumber, formatTime, formatChinaTime, hasNumber, showToast, routingTools, visibleAccounts, updateTools, submitJob, onChange }) => {
     const accountForm = $("#account-form");
     const accountDialog = $("#account-dialog");
     const confirmDialog = $("#confirm-dialog");
@@ -222,12 +222,14 @@
           ]);
           if (generation !== state.sessionGeneration) return;
           state.modelCooldowns = Array.isArray(cooldowns.entries) ? cooldowns.entries : [];
+          state.modelCooldownsDegraded = !!cooldowns.degraded;
           let health = $("#model-cooldown-health");
           if (!health) { health = element("p", "inline-error"); health.id = "model-cooldown-health"; health.setAttribute("role", "status"); $("#account-table-wrap").before(health); }
           health.hidden = !cooldowns.degraded;
           health.textContent = cooldowns.degraded ? "模型冷却存储异常，当前使用本机保护状态" : "";
           const nextAccounts = Array.isArray(result.accounts) ? result.accounts : [];
           state.accounts = nextAccounts;
+          state.accountsLoaded = true;
           state.strategy = result.strategy || "fixed";
           state.availableCredits = hasNumber(result.availableCredits) ? Number(result.availableCredits) : null;
           state.consumedCredits = hasNumber(result.consumedCredits) ? Number(result.consumedCredits) : null;
@@ -235,6 +237,7 @@
           const knownIDs = new Set(state.accounts.map(account => account.id));
           for (const id of Array.from(state.selected)) if (!knownIDs.has(id)) state.selected.delete(id);
           render();
+          onChange();
         } catch (error) {
           if (generation !== state.sessionGeneration) return;
           if (!silent && error.message !== "登录状态已过期，请重新登录") {

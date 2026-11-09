@@ -14,16 +14,33 @@ import (
 	"clodesen2api/internal/config"
 	"clodesen2api/internal/controlstore"
 	"clodesen2api/internal/modelpolicy"
+	"clodesen2api/internal/openai"
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
 )
 
 func TestVerifiedUsageSettlesJSONAndStream(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		t.Run(map[bool]string{false: "json", true: "stream"}[stream], func(t *testing.T) {
+	for _, test := range []struct {
+		path   string
+		stream bool
+	}{{openai.ChatCompletionsPath, false}, {openai.ChatCompletionsPath, true}, {openai.ResponsesPath, false}, {openai.ResponsesPath, true}} {
+		stream := test.stream
+		t.Run(test.path+map[bool]string{false: "/json", true: "/stream"}[stream], func(t *testing.T) {
 			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/login" {
 					io.WriteString(w, `{}`)
+					return
+				}
+				if r.URL.Path != test.path {
+					t.Errorf("upstream path: %s", r.URL.Path)
+				}
+				if test.path == openai.ResponsesPath {
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"total_tokens\":20,\"credits\":3}}}\n\n")
+					} else {
+						io.WriteString(w, `{"object":"response","status":"completed","usage":{"total_tokens":20,"credits":3}}`)
+					}
 					return
 				}
 				if stream {
@@ -76,7 +93,7 @@ func TestVerifiedUsageSettlesJSONAndStream(t *testing.T) {
 				if stream {
 					body = `{"model":"model","stream":true}`
 				}
-				r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+				r := httptest.NewRequest("POST", test.path, strings.NewReader(body))
 				r.Header.Set("Content-Type", "application/json")
 				r.Header.Set("Authorization", "Bearer "+secret)
 				w := httptest.NewRecorder()

@@ -19,6 +19,7 @@ import (
 const (
 	ModelsPath          = "/v1/models"
 	ChatCompletionsPath = "/v1/chat/completions"
+	ResponsesPath       = "/v1/responses"
 	GenerationsPath     = "/v1/images/generations"
 	EditsPath           = "/v1/images/edits"
 
@@ -101,11 +102,11 @@ func BuildRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 			return Request{}, err
 		}
 		return Request{Method: http.MethodGet, Path: ModelsPath}, nil
-	case ChatCompletionsPath:
+	case ChatCompletionsPath, ResponsesPath:
 		if err := requireMethod(r, http.MethodPost); err != nil {
 			return Request{}, err
 		}
-		return buildChatCompletionRequest(r)
+		return buildTextRequest(r)
 	case GenerationsPath:
 		if err := requireMethod(r, http.MethodPost); err != nil {
 			return Request{}, err
@@ -121,7 +122,7 @@ func BuildRequest(w http.ResponseWriter, r *http.Request) (Request, error) {
 	}
 }
 
-func buildChatCompletionRequest(r *http.Request) (Request, error) {
+func buildTextRequest(r *http.Request) (Request, error) {
 	if !hasMediaType(r, "application/json") {
 		return Request{}, &RequestError{
 			Status:  http.StatusUnsupportedMediaType,
@@ -149,17 +150,23 @@ func buildChatCompletionRequest(r *http.Request) (Request, error) {
 	_ = json.Unmarshal(payload["stream"], &stream)
 	return Request{
 		Method:        http.MethodPost,
-		Path:          ChatCompletionsPath,
+		Path:          r.URL.Path,
 		Model:         strings.TrimSpace(model),
 		ContentType:   "application/json",
 		Body:          body,
 		Stream:        stream,
 		ThinkingLevel: thinkingLevel(payload),
-		Parameters:    requestParameters(payload, "messages", "prompt"),
+		Parameters:    requestParameters(payload, "messages", "prompt", "input", "instructions"),
 	}, nil
 }
 
 func thinkingLevel(payload map[string]json.RawMessage) string {
+	var reasoning struct {
+		Effort string `json:"effort"`
+	}
+	if json.Unmarshal(payload["reasoning"], &reasoning) == nil && strings.TrimSpace(reasoning.Effort) != "" {
+		return strings.TrimSpace(reasoning.Effort)
+	}
 	for _, key := range []string{"thinking_level", "reasoning_effort", "thinking"} {
 		var value string
 		if json.Unmarshal(payload[key], &value) == nil && strings.TrimSpace(value) != "" {
@@ -181,7 +188,7 @@ func requestParameters(payload map[string]json.RawMessage, excluded ...string) m
 		exclude[key] = struct{}{}
 	}
 	result := make(map[string]any)
-	allowed := map[string]bool{"temperature": true, "top_p": true, "max_tokens": true, "max_completion_tokens": true, "presence_penalty": true, "frequency_penalty": true, "n": true, "seed": true, "logprobs": true, "top_logprobs": true, "parallel_tool_calls": true, "reasoning_effort": true, "thinking_level": true, "size": true, "quality": true, "response_format": true, "aspect_ratio": true, "resolution": true}
+	allowed := map[string]bool{"temperature": true, "top_p": true, "max_tokens": true, "max_completion_tokens": true, "max_output_tokens": true, "presence_penalty": true, "frequency_penalty": true, "n": true, "seed": true, "logprobs": true, "top_logprobs": true, "parallel_tool_calls": true, "reasoning_effort": true, "thinking_level": true, "size": true, "quality": true, "response_format": true, "aspect_ratio": true, "resolution": true}
 	for key, raw := range payload {
 		if key == "model" || key == "stream" || key == "messages" || key == "prompt" || key == "input" {
 			continue

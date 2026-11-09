@@ -199,20 +199,32 @@ func ReportUsage(ctx context.Context, body []byte) {
 	if !ok {
 		return
 	}
+	type reportedUsage struct {
+		TotalTokens *int64 `json:"total_tokens"`
+		Credits     *int64 `json:"credits"`
+	}
 	var payload struct {
-		Usage struct {
-			TotalTokens *int64 `json:"total_tokens"`
-			Credits     *int64 `json:"credits"`
-		} `json:"usage"`
+		Type     string         `json:"type"`
+		Usage    *reportedUsage `json:"usage"`
+		Response *struct {
+			Usage *reportedUsage `json:"usage"`
+		} `json:"response"`
 	}
 	if json.Unmarshal(body, &payload) != nil {
 		return
 	}
+	reported := payload.Usage
+	if payload.Response != nil && (payload.Type == "response.completed" || payload.Type == "response.incomplete" || payload.Type == "response.failed") {
+		reported = payload.Response.Usage
+	}
+	if reported == nil {
+		return
+	}
 	var actual Amount
-	if n := payload.Usage.TotalTokens; n != nil && *n >= 0 {
+	if n := reported.TotalTokens; n != nil && *n >= 0 {
 		actual.Tokens, actual.TokensKnown = *n, true
 	}
-	if n := payload.Usage.Credits; n != nil && *n >= 0 {
+	if n := reported.Credits; n != nil && *n >= 0 {
 		actual.Credits, actual.CreditsKnown = *n, true
 	}
 	report(actual)

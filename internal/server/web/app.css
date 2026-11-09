@@ -243,6 +243,10 @@ input[type="checkbox"] { width: 17px; min-height: 17px; padding: 0; accent-color
   .credit-usage-table .credit-meta-badge, .credit-usage-table .credit-model-badge, .credit-usage-table .credit-amount-badge { min-height: 20px; padding: 2px 6px; font-size: 11px; line-height: 14px; }
 }
 
+@media (min-width: 391px) and (max-width: 680px) {
+  .analytics-summary { margin-inline: -16px; padding-inline: 16px; }
+}
+
 @media (max-width: 390px) {
   .main-content { padding-right: 12px; padding-left: 12px; }.topbar { padding-right: 12px; padding-left: 12px; }.summary-strip, .analytics-summary { margin-right: -12px; margin-left: -12px; padding-right: 12px; padding-left: 12px; }.summary-actions .button { font-size: 13px; }
 }
@@ -499,6 +503,8 @@ input[type="checkbox"] { accent-color: var(--green); box-shadow: none; }
 .key-limits { min-width: 0; overflow-wrap: anywhere; font-size: 12px; line-height: 16px; }
 .key-limits span { display: block; margin-top: 4px; }
 .key-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.model-test-action { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; max-width: 100%; }
+.model-call-estimate { color: var(--muted); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .model-capabilities { min-width: 0; display: grid; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
 .model-id, .model-card-id, #model-policy-source { overflow-wrap: anywhere; }
 .request-attempts { margin-top: 8px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
@@ -629,9 +635,53 @@ textarea:focus-visible { outline: 2px solid #397383; outline-offset: 3px; }
   .job-filters .button { grid-column: 1 / -1; justify-self: end; }
   .job-summary time { margin-left: 0; flex-basis: 100%; }
 }
-.playground-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 0.875rem; line-height: 1.25rem; }
+#playground-dialog { width: min(1080px, calc(100% - 32px)); max-width: none; max-height: calc(100dvh - 32px); margin: auto; overflow: auto; border-radius: 8px; }
+#playground-dialog .dialog-content { gap: 16px; }
+#playground-dialog .icon-button svg { width: 20px; height: 20px; }
+.playground-modes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 0; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.playground-modes label { position: relative; min-width: 0; cursor: pointer; }
+.playground-modes input { position: absolute; width: 1px; min-height: 0; height: 1px; opacity: 0; }
+.playground-modes span { display: grid; place-items: center; min-height: 40px; padding: 8px; border-radius: 4px; color: var(--muted); font-size: 14px; line-height: 20px; }
+.playground-modes input:checked + span { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgb(0 0 0 / 10%); font-weight: 600; }
+.playground-modes input:focus-visible + span { outline: 2px solid var(--green); outline-offset: -2px; }
+.playground-modes input:disabled + span { opacity: .55; cursor: default; }
+.playground-endpoint { overflow-wrap: anywhere; color: var(--muted); font-size: 12px; line-height: 16px; }
+.playground-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+.playground-controls, .playground-field, .playground-upload { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.playground-controls { gap: 16px; }
+.playground-field input, .playground-field select, .playground-field textarea { min-width: 0; max-width: 100%; }
+.playground-file-picker { position: relative; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#playground-file { min-height: 0; }
+.playground-result { min-width: 0; padding-left: 24px; border-left: 1px solid var(--line); }
+.playground-result h3 { margin: 0 0 16px; font-size: 16px; line-height: 24px; }
+.playground-result p { overflow-wrap: anywhere; }
+.playground-result p:empty, .playground-output:empty, .playground-images:empty { display: none; }
+.playground-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; font-size: 14px; line-height: 20px; }
+.playground-details { margin-top: 16px; font-size: 12px; line-height: 20px; }
+.playground-details summary { cursor: pointer; color: var(--muted); }
 .playground-images { display: grid; gap: 16px; }
-.playground-images img { display: block; width: 100%; height: auto; max-height: 640px; object-fit: contain; }
+.playground-images figure, .playground-previews figure { min-width: 0; margin: 0; }
+.playground-images img { display: block; width: 100%; height: auto; max-height: 480px; object-fit: contain; background: var(--surface-soft); }
+.playground-images a { display: inline-block; margin-top: 8px; }
+.playground-previews { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.playground-previews img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 4px; }
+.playground-previews figcaption { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 12px; line-height: 16px; }
+.playground-previews figcaption span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.playground-previews .icon-button { width: 36px; height: 36px; flex: 0 0 36px; }
+.playground-footer { position: sticky; bottom: 0; display: grid; gap: 12px; margin-bottom: -28px; padding-block: 16px; background: var(--surface); border-top: 1px solid var(--line); z-index: 1; }
+.playground-footer .checkbox-setting { align-items: start; font-size: 12px; line-height: 20px; }
+.playground-footer input { flex-shrink: 0; margin-top: 2px; }
+@media (max-width: 680px) {
+  #playground-dialog { width: 100%; max-height: calc(100dvh - 16px); margin: auto 0 0; border-radius: 8px 8px 0 0; }
+  .playground-body { grid-template-columns: minmax(0, 1fr); }
+  .playground-result { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .playground-footer { margin-bottom: calc(-16px - env(safe-area-inset-bottom)); padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .playground-footer .dialog-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .playground-footer .button { min-width: 0; padding-inline: 8px; }
+}
+@media (max-width: 520px) {
+  .playground-modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 #reports-panel .heading-actions { margin: 16px 0; }
 #reports-panel td { overflow-wrap: anywhere; }
 #reports-panel .table-wrap { display: block !important; overflow-x: auto; }

@@ -78,10 +78,27 @@ func ResponseModel(body []byte, public string) []byte {
 	if json.Unmarshal(body, &payload) != nil || payload == nil {
 		return body
 	}
-	if _, ok := payload["model"]; !ok {
+	changed := false
+	if _, ok := payload["model"]; ok {
+		payload["model"], _ = json.Marshal(public)
+		changed = true
+	}
+	// Responses SSE events carry the model inside their response object.
+	var eventType string
+	_ = json.Unmarshal(payload["type"], &eventType)
+	if raw, ok := payload["response"]; ok && strings.HasPrefix(eventType, "response.") {
+		var response map[string]json.RawMessage
+		if json.Unmarshal(raw, &response) == nil && response != nil {
+			if _, ok := response["model"]; ok {
+				response["model"], _ = json.Marshal(public)
+				payload["response"], _ = json.Marshal(response)
+				changed = true
+			}
+		}
+	}
+	if !changed {
 		return body
 	}
-	payload["model"], _ = json.Marshal(public)
 	result, err := json.Marshal(payload)
 	if err != nil {
 		return body

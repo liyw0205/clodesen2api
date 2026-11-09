@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  window.createAnalyticsView = ({ $, state, api, element, modelPolicies, formatNumber, formatTime, formatDuration, hasNumber, saveNavigation }) => {
+  window.createAnalyticsView = ({ $, state, api, element, modelPolicies, accountAvailable, openPlayground, formatNumber, formatTime, formatDuration, hasNumber, saveNavigation }) => {
     function formatPercent(value) {
       if (!hasNumber(value)) return "--";
       return (Number(value) * 100).toFixed(Number(value) >= 0.995 ? 1 : 1) + "%";
@@ -12,6 +12,34 @@
       }
       if (hasNumber(model.creditsPerRequest)) return formatNumber(model.creditsPerRequest) + " / 次";
       return "";
+    }
+
+    function modelRoute(id) {
+      const seen = new Set();
+      let enabled = true;
+      while (!seen.has(id)) {
+        seen.add(id);
+        const rule = modelPolicies.rule(id);
+        enabled = enabled && rule?.enabled !== false;
+        if (!rule || rule.upstreamId === id) return { id, enabled };
+        id = rule.upstreamId;
+      }
+      return { id, enabled: false };
+    }
+
+    function estimatedCalls(model, route) {
+      if (model.billingType !== "request") return null;
+      if (!route.enabled) return 0;
+      const price = Number(model.creditsPerRequest);
+      if (!hasNumber(model.creditsPerRequest) || price <= 0 || !state.accountsLoaded || state.modelCooldownsDegraded) return "--";
+      let count = 0;
+      for (const account of state.accounts) {
+        if (!accountAvailable(account) || state.modelCooldowns.some(item => item.accountId === account.id && item.model.toLowerCase() === route.id.toLowerCase() && new Date(item.until).getTime() > Date.now())) continue;
+        if (!hasNumber(account.balance)) return "--";
+        // Account balances cannot be pooled to pay for one request.
+        count += Math.floor(Math.max(0, Number(account.balance)) / price);
+      }
+      return formatNumber(count);
     }
 
     function modelPricingParameter(model) {
@@ -76,8 +104,11 @@
       $("#model-credits-heading").hidden = !pricedModels;
       for (const model of models) {
         const id = model.id || model.name || "未命名模型";
-        const credits = modelCredits(model);
-        const parameter = modelPricingParameter(model);
+        const route = modelRoute(id);
+        const pricedModel = models.find(item => item.id === route.id) || (route.id === id ? model : {});
+        const credits = modelCredits(pricedModel);
+        const parameter = modelPricingParameter(pricedModel);
+        const estimated = estimatedCalls(pricedModel, route);
         const row = element("tr");
         const identity = element("td", "model-id");
         const policy = modelPolicies.rule(id);
@@ -90,7 +121,22 @@
           if (parameter) creditCell.append(element("span", "model-credit-parameter", parameter));
           row.append(creditCell);
         }
-        const actions = element("td"); actions.append(modelPolicies.controls(id)); row.append(actions);
+        function controls() {
+          const wrap = modelPolicies.controls(id), test = element("button", "row-action", "测试");
+          test.type = "button";
+          test.disabled = !route.enabled;
+          test.addEventListener("click", () => openPlayground(policy?.publicId || id));
+          const testAction = element("span", "model-test-action");
+          testAction.append(test);
+          if (estimated !== null) {
+            const count = element("span", "model-call-estimate", "预计可调用 " + estimated + " 次");
+            count.title = "按可用账号的余额和单次价格分别取整后汇总；余额或价格未知时暂不估算";
+            testAction.append(count);
+          }
+          wrap.append(testAction);
+          return wrap;
+        }
+        const actions = element("td"); actions.append(controls()); row.append(actions);
         rows.append(row);
 
         const card = element("article", "model-card");
@@ -100,7 +146,7 @@
         if (credits) details.append(element("span", "model-credits", credits));
         if (parameter) details.append(element("span", "model-credit-parameter", parameter));
         card.append(details);
-        card.append(modelPolicies.controls(id));
+        card.append(controls());
         cards.append(card);
       }
     }

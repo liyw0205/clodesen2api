@@ -2,7 +2,9 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const state = {
     accounts: [],
+    accountsLoaded: false,
     modelCooldowns: [],
+    modelCooldownsDegraded: false,
     sessionGeneration: 0,
     selected: new Set(),
     strategy: "fixed",
@@ -69,6 +71,7 @@
       updater.clear();
       routingTools.clear();
       state.settings = null; state.modelCooldowns = []; state.accounts = []; state.selected.clear();
+      state.accountsLoaded = false; state.modelCooldownsDegraded = false;
       state.availableCredits = null; state.consumedCredits = null; state.accountsRefreshedAt = null;
       state.models = []; state.usage = null; state.creditUsage = null; state.requestRecords = null;
       state.modelsLoaded = false; state.creditsLoaded = false;
@@ -232,7 +235,7 @@
       button.tabIndex = selected ? 0 : -1;
       if (selected) $("#current-view-label").textContent = button.lastElementChild.textContent;
     });
-    if (analytics) { void loadAnalytics(false, true); void reports.load(); }
+    if (analytics) { void loadAnalytics(false, true); void accounts.refresh(false, false, true); void reports.load(); }
     else if (records) void requestRecords.load(false);
     else if (settings) { void settingsPanel.load(); void admissionControl.load(); void storageManagement.load(); void operations.load(); void notifications.load(); }
     else if (keys) void keyManagement.load();
@@ -395,7 +398,7 @@
     try { await api("/admin/api/session", { method: "DELETE" }); setLogin(true, false, false); }
     catch (error) { showToast("退出失败：" + error.message); }
   });
-  $("#analytics-refresh").addEventListener("click", () => { void loadAnalytics(true); void reports.load(); });
+  $("#analytics-refresh").addEventListener("click", () => { void loadAnalytics(true); void accounts.refresh(false, true, true); void reports.load(); });
   $("#update-check").addEventListener("click", () => checkForUpdates(false));
   $("#update-install").addEventListener("click", installUpdate);
   $("#update-source-test-all").addEventListener("click", testUpdateSources);
@@ -432,7 +435,7 @@
   });
 
   const modelPolicies = window.createModelPolicies({ api, element, showToast, render: () => analyticsView.renderModels() });
-  const analyticsView = window.createAnalyticsView({ $, state, api, element, modelPolicies, formatNumber, formatTime, formatDuration, hasNumber, saveNavigation });
+  const analyticsView = window.createAnalyticsView({ $, state, api, element, modelPolicies, accountAvailable: account => accounts.accountState(account).className === "status-ready", openPlayground: id => playground.open(id), formatNumber, formatTime, formatDuration, hasNumber, saveNavigation });
   analyticsView.bind();
   const analytics = window.createAnalytics({ api, element, state, modelPolicies, renderModels: analyticsView.renderModels, renderUsage: analyticsView.renderUsage, renderCredits: analyticsView.renderCredits, creditUsagePath: analyticsView.creditUsagePath, formatTime });
   const admissionControl = window.createAdmission({ api, element });
@@ -455,7 +458,10 @@
     selectView("records");
   } });
   const connections = window.createConnections({ api, element, showToast });
-  const playground = window.createPlayground({ element });
+  const playground = window.createPlayground({ element, onUnauthorized: () => setLogin(true, false, false), onComplete: () => { void accounts.refresh(false, true, true); }, getModels: () => state.models.filter(model => modelPolicies.rule(model.id)?.enabled !== false).map(model => {
+    const rule = modelPolicies.rule(model.id);
+    return { id: rule?.publicId || model.id, endpoints: rule?.endpoints };
+  }) });
   const routingTools = window.createRoutingTools({ element, onChange: strategy => accounts.updateStrategy(strategy) });
   const reports = window.createReports({ api, element, formatTime });
   const notifications = window.createNotifications({ api, element, formatTime });
@@ -467,6 +473,7 @@
   const settingsPanel = window.createSettings({ $, api, state, element, settingsTools, renderUpdateSourceOptions, showToast });
   settingsPanel.bind();
   const accounts = window.createAccounts({ $, api, state, element, formatNumber, formatTime, formatChinaTime, hasNumber, showToast, routingTools,
+    onChange: () => analyticsView.renderModels(),
     visibleAccounts: () => accountTools.visible(), updateTools: () => accountTools.update(), submitJob: (...args) => jobManagement.submit(...args) });
   accounts.bind();
   const accountTools = window.createAccountTools({ api, element, getAccounts: () => state.accounts, getSelected: () => state.selected, accountState: account => accounts.accountState(account),

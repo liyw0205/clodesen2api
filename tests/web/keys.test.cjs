@@ -284,7 +284,7 @@ test("routing and update source panels stay inside the viewport and preserve sel
     await page.locator("#account-cards [data-action=edit]").first().click();
     assert.equal(await page.locator("#account-weight").count(), 0); await page.keyboard.press("Escape");
     await page.route("**/admin/api/settings", route => route.request().method() === "PUT" ? route.fulfill({ status: 500, json: { error: "routing save failed" } }) : route.continue());
-    await page.locator("#routing-strategy").click(); await page.locator('#routing-panel input[value="random"]').check();
+    await page.locator("#routing-strategy").click(); await page.locator('#routing-panel input[value="random"]').click();
     await page.waitForFunction(() => document.querySelector("#routing-strategy").getAttribute("aria-disabled") === "false");
     assert.equal(await page.locator('#routing-panel input[value="fixed"]').isChecked(), true);
     await page.unroute("**/admin/api/settings");
@@ -395,30 +395,215 @@ test("default-off notification settings survive reload", async () => {
   }
 });
 
-test("playground enforces consumption consent and handles text, SSE, image, failure and cancel", async () => {
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage(); let created;
+test("playground calls Chat, Responses, generation and multipart edits with consent and responsive layouts", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage();
   page.on("pageerror", error => failures.push(error.message));
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1sAAAAASUVORK5CYII=", "base64");
+  const upload = name => ({ name, mimeType: "image/png", buffer: png });
+  const choose = value => page.locator("#playground-mode label").filter({ has: page.locator("input[value=" + value + "]") }).click();
+  const send = async () => {
+    await page.locator("#playground-consume").check();
+    await page.locator("#playground-send").click();
+    await page.waitForFunction(() => document.querySelector("#playground-status").textContent.includes("已完成"));
+    assert.equal(await page.locator("#playground-consume").isChecked(), false);
+    assert.equal(await page.locator("#playground-error").textContent(), "");
+  };
   try {
     await page.goto(base + "/admin/?view=analytics"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.waitForFunction(() => document.querySelector("#model-count").textContent !== "等待加载");
-    created = await (await context.request.post(base + "/admin/api/keys", { data: { name: "playground-fixture" } })).json(); assert.ok(created.key?.id, JSON.stringify(created));
-    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.locator("#playground-model").fill("allowed-model"); await page.locator("#playground-prompt").fill("fixture test");
+    const keysBefore = await (await context.request.get(base + "/admin/api/keys")).json();
+    await page.locator(".model-card").filter({ hasText: "allowed-model" }).getByRole("button", { name: "测试", exact: true }).click();
+    assert.equal(await page.locator("#playground-model").inputValue(), "allowed-model");
+    assert.equal(await page.locator("#playground-key").count(), 0);
+    assert.equal(await page.locator("#playground-stream").isChecked(), true);
+    await page.locator("#playground-prompt").fill("fixture test");
     await page.locator("#playground-send").click(); assert.equal(await page.locator("#playground-status").textContent(), "");
-    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-status").textContent.includes("已完成")); assert.match(await page.locator("#playground-output").textContent(), /fixture reply/);
-    await page.locator("#playground-stream").check(); await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-status").textContent.includes("已完成")); assert.equal(await page.locator("#playground-output").textContent(), "fixture stream");
-    await page.locator("#playground-mode").selectOption("image"); assert.equal(await page.locator("#playground-stream").isVisible(), false); await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-images img")?.naturalWidth > 0);
-    for (const width of [1440, 768, 390, 320]) { await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth || document.querySelector("#playground-dialog").scrollWidth > document.querySelector("#playground-dialog").clientWidth), false); await page.screenshot({ path: "test-results/playground-" + width + ".png", fullPage: true }); }
-    await page.locator("#playground-mode").selectOption("text"); await page.locator("#playground-stream").uncheck();
-    await page.route("**/v1/chat/completions", route => route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: { message: "fixture rate limit" } }) }));
+    const chatRequest = page.waitForRequest(request => request.url().endsWith("/admin/api/playground/chat/completions"));
+    await send(); assert.equal(await page.locator("#playground-output").textContent(), "fixture stream");
+    const headers = await (await chatRequest).allHeaders();
+    assert.equal(headers.authorization, undefined);
+    assert.match(headers.cookie, /clodesen_admin=/, "model tests use the authenticated admin session");
+    assert.equal((await chatRequest).postDataJSON().stream, true);
+    await page.locator("#playground-prompt").fill("fixture:streaming");
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click();
+    await page.waitForFunction(() => document.querySelector("#playground-output").textContent === "fixture ");
+    assert.equal(await page.locator("#playground-send").isDisabled(), true, "first chunk renders while upstream is still generating");
+    assert.doesNotMatch(await page.locator("#playground-status").textContent(), /已完成/);
+    assert.equal(await page.locator("#playground-output").evaluate(node => {
+      const bounds = node.getBoundingClientRect(), footer = document.querySelector(".playground-footer").getBoundingClientRect();
+      return bounds.top >= 0 && bounds.bottom <= footer.top;
+    }), true, "mobile shows the first streaming chunk immediately");
+    await page.locator("#playground-cancel").click();
+    await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("已取消"));
+    assert.equal(await page.locator("#playground-output").textContent(), "fixture ");
+    await page.locator("#playground-prompt").fill("fixture test");
+    await page.locator("#playground-stream").uncheck(); await send();
+    assert.equal(await page.locator("#playground-output").textContent(), "fixture reply");
+    await choose("responses"); await page.locator("#playground-stream").uncheck();
+    assert.match(await page.locator("#playground-endpoint").textContent(), /\/v1\/responses$/);
+    await send(); assert.equal(await page.locator("#playground-output").textContent(), "fixture responses reply");
+    assert.match(await page.locator("#playground-usage").textContent(), /总 Token 20/);
+    await page.locator("#playground-stream").check(); await send();
+    assert.equal(await page.locator("#playground-output").textContent(), "fixture responses stream", "Responses completes without a Chat DONE marker or duplicate final output");
+    assert.match(await page.locator("#playground-usage").textContent(), /积分 3/);
+    assert.equal(await page.locator("#playground-output").evaluate(node => {
+      const bounds = node.getBoundingClientRect(), footer = document.querySelector(".playground-footer").getBoundingClientRect();
+      return bounds.top >= 0 && bounds.bottom <= footer.top;
+    }), true, "mobile completion reveals the returned text above request actions");
+    mkdirSync("test-results", { recursive: true });
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.locator("#playground-dialog").evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await page.screenshot({ path: "test-results/playground-responses-" + width + ".png" });
+    }
+    await choose("image"); assert.equal(await page.locator("#playground-stream").isVisible(), false);
+    await page.locator("#playground-size").selectOption("1536x1024"); await send();
+    await page.waitForFunction(() => document.querySelector("#playground-images img")?.naturalWidth > 0);
+    assert.match(await page.locator("#playground-images").textContent(), /fixture generation:1536x1024/);
+    assert.match(await page.locator("#playground-images a").getAttribute("download"), /\.png$/);
+    await choose("edit");
+    await page.locator("#playground-file").setInputFiles({ name: "fake.png", mimeType: "image/png", buffer: Buffer.from("not an image") });
+    await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("仅支持"));
+    assert.equal(await page.locator("#playground-previews img").count(), 0);
+    await page.locator("#playground-file").setInputFiles(Array.from({ length: 11 }, (_, index) => upload("image-" + index + ".png")));
+    await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("最多上传"));
+    await page.locator("#playground-file").setInputFiles({ name: "huge.png", mimeType: "image/png", buffer: Buffer.alloc(20 * 1024 * 1024 + 1) });
+    await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("20 MB"));
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click();
+    assert.equal(await page.locator("#playground-status").textContent(), "", "invalid uploads cannot send");
+    await page.locator("#playground-file").setInputFiles([upload("reference-one.png"), upload("reference-with-a-long-filename-01234567890123456789.png")]);
+    await page.waitForFunction(() => document.querySelectorAll("#playground-previews img").length === 2 && [...document.querySelectorAll("#playground-previews img")].every(img => img.naturalWidth > 0));
+    await page.locator("#playground-size").selectOption("1024x1536"); await send();
+    assert.match(await page.locator("#playground-images").textContent(), /fixture edit:2:1024x1536/, "gateway forwards both original images and selected size intact");
+    mkdirSync("test-results", { recursive: true });
+    for (const { width, height } of [{ width: 1440, height: 844 }, { width: 768, height: 844 }, { width: 390, height: 844 }, { width: 320, height: 844 }, { width: 320, height: 568 }, { width: 568, height: 320 }]) {
+      await page.setViewportSize({ width, height });
+      await page.locator("#playground-dialog").evaluate(node => { node.scrollTop = 0; });
+      const geometry = await page.locator("#playground-dialog").evaluate(dialog => {
+        const bounds = dialog.getBoundingClientRect();
+        const actions = [...dialog.querySelectorAll(".playground-footer button")].map(button => button.getBoundingClientRect());
+        return { overflow: document.documentElement.scrollWidth > innerWidth || dialog.scrollWidth > dialog.clientWidth,
+          inView: bounds.top >= 0 && bounds.bottom <= innerHeight && actions.every(rect => rect.top >= bounds.top && rect.bottom <= bounds.bottom),
+          fieldsFit: [...dialog.querySelectorAll(".playground-field, .playground-modes span, figcaption")].every(node => node.scrollWidth <= node.clientWidth + 1) };
+      });
+      assert.deepEqual(geometry, { overflow: false, inView: true, fieldsFit: true }, "layout at " + width);
+      await page.screenshot({ path: "test-results/playground-" + width + (height === 844 ? "" : "-" + height) + ".png" });
+    }
+    await page.locator("#playground-previews button").first().click();
+    assert.equal(await page.locator("#playground-previews img").count(), 1); await send();
+    assert.match(await page.locator("#playground-images").textContent(), /fixture edit:1:1024x1536/);
+    await choose("chat"); assert.equal(await page.locator("#playground-previews img").count(), 0);
+    assert.equal(await page.locator("#playground-stream").isVisible(), true);
+    assert.equal(await page.locator("#playground-size").isVisible(), false);
+    await choose("edit"); assert.equal(await page.locator("#playground-previews img").count(), 0);
+    await page.locator("#playground-file").setInputFiles(upload("clear-on-close.png"));
+    await page.waitForFunction(() => document.querySelectorAll("#playground-previews img").length === 1);
+    await page.locator("#playground-dialog button[aria-label=关闭]").click();
+    assert.equal(await page.locator("#playground-model").inputValue(), "");
+    assert.equal(await page.locator("#playground-previews img").count(), 0);
+    assert.equal(await page.locator("#playground-prompt").inputValue(), "");
+    assert.deepEqual((await (await context.request.get(base + "/admin/api/keys")).json()).keys, keysBefore.keys, "testing does not create client keys");
+  } finally { await context.close(); }
+});
+
+test("playground preserves partial output, distinguishes upstream auth from session expiry and clears on close", async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  try {
+    await page.goto(base + "/admin/?view=analytics"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({ state: "visible" });
+    await page.locator("#playground-open").click(); await page.locator("#playground-model").fill("allowed-model");
+    await page.locator("#playground-mode label").filter({ hasText: "Responses" }).click();
+    for (const stream of [false, true]) {
+      await page.locator("#playground-stream").setChecked(stream);
+      for (const [prompt, error] of [["fixture:incomplete", "max_output_tokens"], ["fixture:failed", "fixture response failed"], ...(stream ? [["fixture:truncated", "提前结束"]] : [])]) {
+        await page.locator("#playground-prompt").fill(prompt);
+        await page.locator("#playground-consume").check(); await page.locator("#playground-send").click();
+        await page.waitForFunction(error => document.querySelector("#playground-error").textContent.includes(error), error);
+        assert.match(await page.locator("#playground-output").textContent(), /fixture responses/);
+        assert.doesNotMatch(await page.locator("#playground-status").textContent(), /已完成/);
+      }
+    }
+    await page.locator("#playground-mode label").filter({ hasText: "Chat" }).click(); await page.locator("#playground-stream").uncheck();
+    await page.locator("#playground-prompt").fill("fixture test");
+    const chatPath = "**/admin/api/playground/chat/completions";
+    await page.route(chatPath, route => route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: { message: "fixture rate limit" } }) }));
     await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("fixture rate limit"));
-    await page.unroute("**/v1/chat/completions"); let release; const pending = new Promise(resolve => { release = resolve; });
-    await page.route("**/v1/chat/completions", async route => { await pending; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ choices: [{ message: { content: "late reply" } }] }) }).catch(() => {}); });
+    assert.match(await page.locator("#playground-status").textContent(), /HTTP 429/);
+    await page.unroute(chatPath);
+    await page.route(chatPath, route => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { message: "fixture unauthorized" } }) }));
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click();
+    await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("fixture unauthorized"));
+    assert.equal(await page.locator("#dashboard").isVisible(), true, "upstream 401 keeps the admin session");
+    await page.unroute(chatPath);
+    let release; const pending = new Promise(resolve => { release = resolve; });
+    await page.route(chatPath, async route => { await pending; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ choices: [{ message: { content: "late reply" } }] }) }).catch(() => {}); });
     await page.locator("#playground-consume").check(); await page.locator("#playground-send").click(); await page.locator("#playground-cancel").click(); release(); await page.waitForFunction(() => document.querySelector("#playground-error").textContent.includes("已取消")); assert.doesNotMatch(await page.locator("#playground-output").textContent(), /late reply/);
-    await page.locator("#playground-dialog button[aria-label=关闭]").click(); assert.equal(await page.locator("#playground-key").inputValue(), ""); assert.equal(await page.locator("#playground-prompt").inputValue(), "");
-    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.keyboard.press("Escape"); assert.equal(await page.locator("#playground-key").inputValue(), "");
-    await page.locator("#playground-open").click(); await page.locator("#playground-key").fill(created.secret); await page.evaluate(() => document.querySelector("#logout-button").click()); await page.locator("#login-panel").waitFor({ state: "visible" }); assert.equal(await page.locator("#playground-key").inputValue(), "");
-    await context.request.post(base + "/admin/api/session", { data: { token: "test-admin-123" } });
-    await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version); created = null;
-  } finally { if (created?.key?.id && created?.key?.version) await context.request.delete(base + "/admin/api/keys/" + created.key.id + "?version=" + created.key.version).catch(() => {}); await context.close(); }
+    await page.locator("#playground-dialog button[aria-label=关闭]").click(); assert.equal(await page.locator("#playground-model").inputValue(), ""); assert.equal(await page.locator("#playground-prompt").inputValue(), "");
+    await page.locator("#playground-open").click(); await page.locator("#playground-prompt").fill("clear me"); await page.keyboard.press("Escape"); assert.equal(await page.locator("#playground-prompt").inputValue(), "");
+    await page.locator("#playground-open").click(); await page.locator("#playground-model").fill("allowed-model"); await page.locator("#playground-prompt").fill("expired session");
+    await page.unroute(chatPath); await context.request.delete(base + "/admin/api/session");
+    await page.locator("#playground-consume").check(); await page.locator("#playground-send").click();
+    await page.locator("#login-panel").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#playground-dialog").isVisible(), false);
+    assert.equal(await page.locator("#playground-model").inputValue(), "");
+    assert.equal(await page.locator("#playground-prompt").inputValue(), "");
+  } finally { await context.close(); }
+});
+
+test("model call estimates use per-account request pricing, effective mappings and refreshed availability", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage(); page.on("pageerror", error => failures.push(error.message));
+  const future = new Date(Date.now() + 3600000).toISOString(), past = new Date(Date.now() - 3600000).toISOString();
+  const models = [
+    { id: "alias", billingType: "request", creditsPerRequest: 5 },
+    { id: "request", billingType: "request", creditsPerRequest: 100 },
+    { id: "token", billingType: "token", creditsPerRequest: 1 },
+    { id: "unknown" }, { id: "zero", billingType: "request", creditsPerRequest: 0 },
+    { id: "missing", billingType: "request" },
+  ];
+  let accounts = [
+    { id: "one", enabled: true, balance: 160 }, { id: "two", enabled: true, balance: 160 },
+    { id: "disabled", enabled: false, balance: 10000 },
+    { id: "cooling", enabled: true, balance: 10000, cooldownUntil: future, cooldownReason: "temporary_ban" },
+    { id: "error", enabled: true, balance: 10000, error: "unavailable" },
+    { id: "recheck", enabled: true, balance: 10000, cooldownUntil: past, cooldownReason: "insufficient_credits" },
+    { id: "recovered", enabled: true, balance: 160, cooldownUntil: past, cooldownReason: "temporary_ban" },
+    { id: "model-cooling", enabled: true, balance: 10000 },
+  ];
+  let degraded = false;
+  await page.route("**/admin/api/models*", route => route.fulfill({ json: { data: models } }));
+  await page.route("**/admin/api/model-policies", route => route.fulfill({ json: { revision: 1, models: models.map(model => ({ sourceId: model.id, publicId: model.id === "alias" ? "public-alias" : model.id, upstreamId: model.id === "alias" ? "request" : model.id, enabled: true })) } }));
+  await page.route("**/admin/api/accounts*", route => route.fulfill({ json: { accounts, strategy: "fixed", refreshedAt: new Date().toISOString() } }));
+  await page.route("**/admin/api/model-cooldowns", route => route.fulfill({ json: { degraded, entries: [{ accountId: "model-cooling", model: "REQUEST", until: future }] } }));
+  const row = id => page.locator("#model-rows tr").filter({ has: page.locator("strong", { hasText: new RegExp("^" + id + "$") }) });
+  const refresh = async expected => {
+    await page.locator("#analytics-refresh").click();
+    await page.waitForFunction(expected => document.querySelector("#model-rows .model-call-estimate")?.textContent === expected, expected);
+  };
+  try {
+    await page.goto(base + "/admin/?view=analytics"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelector("#model-rows .model-call-estimate")?.textContent === "预计可调用 3 次");
+    assert.equal(await row("request").locator(".model-call-estimate").textContent(), "预计可调用 3 次");
+    assert.equal(await row("public-alias").locator(".model-credit-value").textContent(), "100 / 次", "aliases use final upstream pricing");
+    assert.equal(await row("token").locator(".model-call-estimate").count(), 0);
+    assert.equal(await row("unknown").locator(".model-call-estimate").count(), 0);
+    for (const id of ["zero", "missing"]) assert.equal(await row(id).locator(".model-call-estimate").textContent(), "预计可调用 -- 次");
+    mkdirSync("test-results", { recursive: true });
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      const estimate = width <= 680 ? page.locator("#model-cards .model-call-estimate").first() : page.locator("#model-rows .model-call-estimate").first();
+      assert.equal(await estimate.evaluate(node => {
+        const label = node.getBoundingClientRect(), button = node.previousElementSibling.getBoundingClientRect();
+        return label.left >= 0 && label.right <= innerWidth && !(label.left < button.right && label.right > button.left && label.top < button.bottom && label.bottom > button.top);
+      }), true, "call estimate and test button fit at " + width);
+      await page.screenshot({ path: "test-results/model-estimates-" + width + ".png", fullPage: true });
+    }
+    accounts.push({ id: "unread", enabled: true, balance: null }); await refresh("预计可调用 -- 次");
+    accounts = accounts.filter(account => account.id !== "unread").map(account => account.id === "one" ? { ...account, balance: 400 } : account);
+    await refresh("预计可调用 6 次");
+    degraded = true; await refresh("预计可调用 -- 次");
+    degraded = false; accounts = []; await refresh("预计可调用 0 次");
+  } finally { await context.close(); }
 });
 
 test("settings groups preview restart impact and persist resource TTLs and backup schedule", async () => {
@@ -1131,6 +1316,15 @@ test("model policies edit, alias filtering, disable and conflict", async () => {
   assert.equal(response.status(), 403);
   response = await context.request.post(base + "/v1/chat/completions", { headers, data: { model: "public-model" } });
   assert.equal(response.status(), 200);
+  assert.equal((await context.request.post(base + "/v1/responses", { headers, data: { model: "public-model", input: "fixture" } })).status(), 403);
+  await row.getByRole("button", { name: "编辑策略" }).click();
+  for (const input of await page.locator("input[name=model-endpoint]").all()) await input.check();
+  await page.locator("#model-policy-save").click(); await page.locator("#model-policy-editor").waitFor({ state: "hidden" });
+  const responses = await context.request.post(base + "/v1/responses", { headers, data: { model: "public-model", input: "fixture" } });
+  assert.equal(responses.status(), 200); assert.equal((await responses.json()).model, "public-model");
+  await row.getByRole("button", { name: "测试", exact: true }).click();
+  assert.equal(await page.locator("#playground-model").inputValue(), "public-model");
+  await page.locator("#playground-dialog button[aria-label=关闭]").click();
   await row.getByRole("button", { name: "编辑策略" }).click();
   await page.locator("#model-policy-enabled").uncheck();
   await page.locator("#model-policy-save").click();

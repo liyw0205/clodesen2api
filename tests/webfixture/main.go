@@ -3,13 +3,16 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"clodesen2api/internal/admin"
@@ -25,6 +28,8 @@ import (
 	"clodesen2api/internal/upstream"
 	"clodesen2api/internal/usage"
 )
+
+const fixturePNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1sAAAAASUVORK5CYII="
 
 func main() {
 	dir, err := os.MkdirTemp("", "clodesen-web-fixture-")
@@ -49,7 +54,16 @@ func main() {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body.Stream {
 				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"fixture stream\"}}]}\n\ndata: [DONE]\n\n")
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"fixture \"}}]}\n\n")
+				w.(http.Flusher).Flush()
+				if len(body.Messages) > 0 && body.Messages[0].Content == "fixture:streaming" {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(10 * time.Second):
+					}
+				}
+				fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"stream\"}}]}\n\ndata: [DONE]\n\n")
 				return
 			}
 			if len(body.Messages) > 0 && body.Messages[0].Content == "fixture:429" {
@@ -62,8 +76,75 @@ func main() {
 			if len(body.Messages) > 0 && body.Messages[0].Content == "fixture:metered" {
 				result.(map[string]any)["usage"] = map[string]int{"total_tokens": 20, "credits": 3}
 			}
+		case "/api/openai/v1/responses":
+			var body struct {
+				Model  string `json:"model"`
+				Input  string `json:"input"`
+				Stream bool   `json:"stream"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Input == "" || body.Model == "" {
+				http.Error(w, "missing Responses input/model", 400)
+				return
+			}
+			text, status := "fixture responses reply", "completed"
+			if body.Stream {
+				text = "fixture responses stream"
+			}
+			response := map[string]any{"id": "resp_fixture", "object": "response", "model": body.Model, "status": status, "output": []any{map[string]any{"type": "message", "content": []any{map[string]string{"type": "output_text", "text": text}}}}, "usage": map[string]int{"input_tokens": 12, "output_tokens": 8, "total_tokens": 20, "credits": 3}}
+			if body.Input == "fixture:incomplete" {
+				status = "incomplete"
+				response["status"] = status
+				response["incomplete_details"] = map[string]string{"reason": "max_output_tokens"}
+			}
+			if body.Input == "fixture:failed" {
+				status = "failed"
+				response["status"] = status
+				response["error"] = map[string]string{"message": "fixture response failed"}
+			}
+			if body.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, ": fixture heartbeat\r\n\r\n")
+				delta, _ := json.Marshal(map[string]string{"type": "response.output_text.delta", "delta": text})
+				fmt.Fprintf(w, "event: response.output_text.delta\r\ndata: %s\r\n\r\n", delta)
+				if body.Input != "fixture:truncated" {
+					terminal, _ := json.Marshal(map[string]any{"type": "response." + status, "response": response})
+					fmt.Fprintf(w, "event: response.%s\r\ndata: %s\r\n\r\n", status, terminal)
+				}
+				return
+			}
+			result = response
 		case "/api/openai/v1/images/generations":
-			result = map[string]any{"data": []any{map[string]string{"b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1sAAAAASUVORK5CYII="}}}
+			var body struct{ Model, Prompt, Size string }
+			if json.NewDecoder(r.Body).Decode(&body) != nil || body.Model == "" || body.Prompt == "" {
+				http.Error(w, "missing generation model/prompt", 400)
+				return
+			}
+			result = map[string]any{"data": []any{map[string]string{"b64_json": fixturePNG, "revised_prompt": "fixture generation:" + body.Size}}}
+		case "/api/openai/v1/images/edits":
+			if r.ParseMultipartForm(1<<20) != nil {
+				http.Error(w, "invalid edit multipart", 400)
+				return
+			}
+			defer r.MultipartForm.RemoveAll()
+			files := r.MultipartForm.File["image"]
+			if len(files) == 0 || r.FormValue("prompt") == "" || r.FormValue("model") == "" || r.FormValue("response_format") != "b64_json" {
+				http.Error(w, "missing edit image/model/prompt/format", 400)
+				return
+			}
+			for _, file := range files {
+				reader, err := file.Open()
+				if err != nil {
+					http.Error(w, "unreadable edit image", 400)
+					return
+				}
+				data, err := io.ReadAll(reader)
+				reader.Close()
+				if err != nil || base64.StdEncoding.EncodeToString(data) != fixturePNG {
+					http.Error(w, "edit image bytes changed", 400)
+					return
+				}
+			}
+			result = map[string]any{"data": []any{map[string]string{"b64_json": fixturePNG, "revised_prompt": fmt.Sprintf("fixture edit:%d:%s", len(files), strings.TrimSpace(r.FormValue("size")))}}}
 		case "/api/checkin":
 			result = map[string]any{"enabled": true, "checkedIn": true, "balance": 1234}
 		case "/api/limited-redemption":
@@ -73,7 +154,10 @@ func main() {
 				result = map[string]any{"enabled": true, "remaining": 2, "limit": 3}
 			}
 		case "/api/credits":
-			result = map[string]any{"pricing": map[string]any{"models": []any{}}}
+			result = map[string]any{"pricing": map[string]any{"models": []any{
+				map[string]any{"model": "allowed-model", "creditsPerRequest": 100, "enabled": true},
+				map[string]any{"model": "other-model", "tokenPricing": map[string]int{"input": 1, "output": 2}, "enabled": true},
+			}}}
 		case "/api/account":
 			result = map[string]any{"account": map[string]any{"transactions": []any{}}}
 		default:

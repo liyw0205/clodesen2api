@@ -21,6 +21,12 @@ import (
 )
 
 func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
+	for _, endpoint := range []string{openai.ChatCompletionsPath, openai.ResponsesPath} {
+		t.Run(endpoint, func(t *testing.T) { testPolicyFiltersModelsAndAuthorizesAliases(t, endpoint) })
+	}
+}
+
+func testPolicyFiltersModelsAndAuthorizesAliases(t *testing.T, endpoint string) {
 	var calls atomic.Int32
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -28,7 +34,7 @@ func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
 			io.WriteString(w, `{}`)
 		case "/api/openai/v1/models":
 			io.WriteString(w, `{"data":[{"id":"source-a"},{"id":"source-b"}]}`)
-		case "/api/openai/v1/chat/completions":
+		case "/api/openai" + endpoint:
 			calls.Add(1)
 			var payload struct {
 				Model  string `json:"model"`
@@ -40,7 +46,11 @@ func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
 			}
 			if payload.Stream {
 				w.Header().Set("Content-Type", "text/event-stream")
-				io.WriteString(w, "data: {\"model\":\"source-a\",\"choices\":[]}\n\ndata: [DONE]\n\n")
+				if endpoint == openai.ResponsesPath {
+					io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"source-a\",\"status\":\"completed\"}}\n\n")
+				} else {
+					io.WriteString(w, "data: {\"model\":\"source-a\",\"choices\":[]}\n\ndata: [DONE]\n\n")
+				}
 			} else {
 				io.WriteString(w, `{"model":"source-a","choices":[]}`)
 			}
@@ -71,7 +81,7 @@ func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, _ := policies.Snapshot(ctx)
-	snapshot, err = policies.Put(ctx, snapshot.Revision, modelpolicy.Rule{SourceID: "source-a", PublicID: "public-a", UpstreamID: "source-a", Enabled: true})
+	snapshot, err = policies.Put(ctx, snapshot.Revision, modelpolicy.Rule{SourceID: "source-a", PublicID: "public-a", UpstreamID: "source-a", Enabled: true, Endpoints: []string{endpoint}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,20 +119,26 @@ func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
 			t.Fatalf("list: %d %s", listed.Code, listed.Body.String())
 		}
 	}
+	if w := call(endpoint, `{"model":"public-a"}`, ""); w.Code != 401 {
+		t.Fatalf("authentication bypass: %d", w.Code)
+	}
+	if w := call(openai.EditsPath, `{"model":"public-a","prompt":"edit","image":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jY1sAAAAASUVORK5CYII="}}`, secret); w.Code != 403 {
+		t.Fatalf("endpoint capability bypass: %d %s", w.Code, w.Body.String())
+	}
 	for _, stream := range []bool{false, true} {
 		body := `{"model":"public-a","stream":false}`
 		if stream {
 			body = `{"model":"public-a","stream":true}`
 		}
-		w := call(openai.ChatCompletionsPath, body, secret)
+		w := call(endpoint, body, secret)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "public-a") || strings.Contains(w.Body.String(), "source-a") {
 			t.Fatalf("mapped response: %d %s", w.Code, w.Body.String())
 		}
 	}
-	if w := call(openai.ChatCompletionsPath, `{"model":"source-a"}`, secret); w.Code != 403 {
+	if w := call(endpoint, `{"model":"source-a"}`, secret); w.Code != 403 {
 		t.Fatalf("hidden source bypass: %d", w.Code)
 	}
-	if w := call(openai.ChatCompletionsPath, `{"model":"public-a"}`, other); w.Code != 403 {
+	if w := call(endpoint, `{"model":"public-a"}`, other); w.Code != 403 {
 		t.Fatalf("key bypass: %d", w.Code)
 	}
 	rule := snapshot.Models[0]
@@ -130,14 +146,14 @@ func TestPolicyFiltersModelsAndAuthorizesAliasesByStableSource(t *testing.T) {
 	if _, err := policies.Put(ctx, snapshot.Revision, rule); err != nil {
 		t.Fatal(err)
 	}
-	if w := call(openai.ChatCompletionsPath, `{"model":"public-a"}`, secret); w.Code != 403 {
+	if w := call(endpoint, `{"model":"public-a"}`, secret); w.Code != 403 {
 		t.Fatalf("disabled bypass: %d", w.Code)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("unexpected upstream calls: %d", calls.Load())
 	}
 	for _, record := range stats.RequestRecords() {
-		if record.Success && record.Endpoint == openai.ChatCompletionsPath && (record.SourceModel != "source-a" || record.UpstreamModel != "source-a" || record.PolicyRevision == 0) {
+		if record.Success && record.Endpoint == endpoint && (record.SourceModel != "source-a" || record.UpstreamModel != "source-a" || record.PolicyRevision == 0) {
 			t.Fatalf("audit mapping missing: %+v", record)
 		}
 	}

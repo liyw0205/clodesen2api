@@ -32,6 +32,7 @@ var requestSequence atomic.Uint64
 var forwardedPaths = [...]string{
 	openai.ModelsPath,
 	openai.ChatCompletionsPath,
+	openai.ResponsesPath,
 	openai.EditsPath,
 	openai.GenerationsPath,
 }
@@ -105,25 +106,34 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 		mux.Handle("/admin/api/", adminHeaders(adminHandlers[0]))
 	}
 
-	forward := func(w http.ResponseWriter, r *http.Request) {
+	forward := func(w http.ResponseWriter, r *http.Request, adminCall bool) {
+		requestAuth := auth
+		if adminCall {
+			requestAuth = nil
+		}
 		start := time.Now()
 		clientIP := requestRemoteIP(r)
 		requestID := fmt.Sprintf("req_%x_%x", start.UnixNano(), requestSequence.Add(1))
 		w.Header().Set("X-Request-ID", requestID)
 		var principal apikey.Principal
+		if adminCall {
+			principal = apikey.Principal{ID: "admin-playground", Name: "管理测试台"}
+		}
 		if auth != nil {
+			clientIP = auth.ClientIP(clientIP, r.Header.Get("X-Forwarded-For"))
+		}
+		if requestAuth != nil {
 			remoteIP := requestRemoteIP(r)
-			clientIP = auth.ClientIP(remoteIP, r.Header.Get("X-Forwarded-For"))
 			var authErr *apikey.AuthError
-			principal, authErr = auth.PreAuthenticate(remoteIP, r.Header.Get("X-Forwarded-For"), r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
+			principal, authErr = requestAuth.PreAuthenticate(remoteIP, r.Header.Get("X-Forwarded-For"), r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
 			if authErr != nil {
 				recordRejectedAuth(stats, r.URL.Path, "", principal, clientIP, requestID, start, authErr)
 				writeAuthError(w, authErr)
 				log.Printf("[auth] rejected %s %s: %s", r.Method, r.URL.Path, authErr.Code)
 				return
 			}
-			r = r.WithContext(apikey.WithPrincipal(r.Context(), principal))
 		}
+		r = r.WithContext(apikey.WithPrincipal(r.Context(), principal))
 		stats.RecordRequest(usage.RequestRecord{CreatedAt: start, RequestID: requestID, Stage: "started", Endpoint: r.URL.Path, APIKeyID: principal.ID, APIKeyName: principal.Name, ClientIP: clientIP, AuthResult: "authorized", Type: "unknown"})
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -209,12 +219,12 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 				return
 			}
 		}
-		if auth != nil {
+		if requestAuth != nil {
 			var authErr *apikey.AuthError
 			if request.Path == openai.ModelsPath {
-				authErr = auth.Validate(principal)
+				authErr = requestAuth.Validate(principal)
 			} else {
-				authErr = auth.CheckModel(principal, sourceModel)
+				authErr = requestAuth.CheckModel(principal, sourceModel)
 			}
 			if authErr != nil {
 				recordRejectedAuth(stats, r.URL.Path, publicModel, principal, clientIP, requestID, start, authErr)
@@ -225,8 +235,8 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 		}
 		if lease != nil {
 			var check admission.Check
-			if auth != nil {
-				check = auth.AdmissionCheck(principal, sourceModel)
+			if requestAuth != nil {
+				check = requestAuth.AdmissionCheck(principal, sourceModel)
 			}
 			if err := lease.AdmitMetered(r.Context(), request.Model, principal.Limits, principal.RPM, check, meter, requestID); err != nil {
 				denyCapacity(err)
@@ -246,8 +256,8 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 				}()
 			}
 		}
-		if auth != nil && request.Path != openai.ModelsPath && lease == nil {
-			if authErr := auth.Authorize(principal, sourceModel); authErr != nil {
+		if requestAuth != nil && request.Path != openai.ModelsPath && lease == nil {
+			if authErr := requestAuth.Authorize(principal, sourceModel); authErr != nil {
 				recordRejectedAuth(stats, r.URL.Path, publicModel, principal, clientIP, requestID, start, authErr)
 				writeAuthError(w, authErr)
 				return
@@ -301,7 +311,7 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 			}()
 		}
 		if policies != nil && request.Path == openai.ModelsPath {
-			forwardErr, wrote = forwardPublicModels(r.Context(), response, up, policies, auth, principal)
+			forwardErr, wrote = forwardPublicModels(r.Context(), response, up, policies, requestAuth, principal)
 		} else {
 			forwardErr, wrote = up.Forward(r.Context(), response, request)
 		}
@@ -344,7 +354,13 @@ func NewHandlerWithAdmission(up *upstream.Upstream, stats *usage.Collector, auth
 	}
 
 	for _, path := range forwardedPaths {
-		mux.HandleFunc(path, forward)
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) { forward(w, r, false) })
+	}
+	if len(adminHandlers) > 0 {
+		if panel, ok := adminHandlers[0].(interface{ SetPlaygroundHandler(http.Handler) }); ok {
+			// The admin service authenticates the session and checks origin before forwarding.
+			panel.SetPlaygroundHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forward(w, r, true) }))
+		}
 	}
 
 	return mux
@@ -486,7 +502,7 @@ func (w *trackingResponseWriter) Unwrap() http.ResponseWriter {
 
 func adminHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")

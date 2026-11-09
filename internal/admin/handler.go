@@ -71,6 +71,7 @@ type Service struct {
 	modelPolicies       *modelpolicy.Store
 	modelCooldowns      *modelcooldown.Store
 	admission           *admission.Store
+	playground          http.Handler
 	jobs                *jobs.Store
 	refreshes           refreshGroup
 	accountSyncMu       sync.Mutex
@@ -85,6 +86,12 @@ type Service struct {
 func (s *Service) SetAdmission(store *admission.Store) {
 	s.mu.Lock()
 	s.admission = store
+	s.mu.Unlock()
+}
+
+func (s *Service) SetPlaygroundHandler(handler http.Handler) {
+	s.mu.Lock()
+	s.playground = handler
 	s.mu.Unlock()
 }
 
@@ -242,7 +249,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authenticated(r) {
-		writeError(w, http.StatusUnauthorized, "请先登录管理后台")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "请先登录管理后台", "code": "admin_session_expired"})
 		return
 	}
 	if s.Draining() && isMutation(r.Method) {
