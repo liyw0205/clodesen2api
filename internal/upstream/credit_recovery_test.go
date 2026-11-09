@@ -158,6 +158,60 @@ func TestExpiredCreditCooldownRequiresBalanceRecheck(t *testing.T) {
 	}
 }
 
+func TestCreditCooldownThresholdRuntimeConfig(t *testing.T) {
+	for _, mode := range []string{"pool", "single"} {
+		t.Run(mode, func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/login":
+					fmt.Fprint(w, `{}`)
+				case "/checkin":
+					fmt.Fprint(w, `{"enabled":true,"balance":150}`)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer remote.Close()
+			cfg := &config.Config{}
+			cfg.Upstream.BaseURL, cfg.Upstream.LoginPath, cfg.Checkin.Path = remote.URL, "/login", "/checkin"
+			cfg.Auth.CreditCooldownThreshold = 200
+			var pool *Upstream
+			var err error
+			if mode == "pool" {
+				pool, err = NewWithAccounts(cfg, []AccountCredential{{ID: "a", Identifier: "a", Password: "pw", Enabled: true}})
+			} else {
+				cfg.Auth.Identifier, cfg.Auth.Password = "a", "pw"
+				pool, err = newSession(cfg)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			account := pool
+			if mode == "pool" {
+				account = pool.accounts[0]
+			}
+			for _, step := range []struct {
+				threshold int64
+				available bool
+			}{{200, false}, {100, true}, {150, false}, {0, true}} {
+				if step.threshold != 200 {
+					cfg.Auth.CreditCooldownThreshold = step.threshold
+					pool.ApplyRuntimeConfig(cfg)
+				}
+				account.refreshCreditBalance(context.Background())
+				if available := pool.accountAvailable(account); available != step.available {
+					t.Fatalf("threshold=%d balance=150 available=%t, want %t", step.threshold, available, step.available)
+				}
+				if reserved := pool.reserveAccountRequest(account); reserved != step.available {
+					t.Fatalf("threshold=%d request reserved=%t, want %t", step.threshold, reserved, step.available)
+				} else if reserved {
+					pool.releaseAccountRequest(account)
+				}
+			}
+		})
+	}
+}
+
 func TestCreditErrorDetectionIgnoresGeneratedContent(t *testing.T) {
 	for _, body := range []string{
 		`{"choices":[{"message":{"content":"insufficient credits"}}]}`,

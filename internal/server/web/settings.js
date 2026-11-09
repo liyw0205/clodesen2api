@@ -12,6 +12,7 @@
       $("#settings-user-agent").value = settings.upstream?.userAgent || "";
       $("#settings-strategy").value = settings.auth?.strategy || "fixed";
       $("#settings-account-rpm").value = settings.auth?.rpm || 4;
+      $("#settings-credit-cooldown-threshold").value = settings.auth?.creditCooldownThreshold || 100;
       $("#settings-auto-relogin").checked = Boolean(settings.auth?.autoRelogin);
       $("#settings-checkin-enable").checked = Boolean(settings.checkin?.enable);
       $("#settings-checkin-path").value = settings.checkin?.path || "";
@@ -30,7 +31,7 @@
       const controls = {
         "server.addr": "settings-server-addr", "upstream.baseURL": "settings-base-url", "upstream.openAIBaseURL": "settings-openai-url",
         "upstream.loginPath": "settings-login-path", "upstream.loginTimeout": "settings-login-timeout", "upstream.requestTimeout": "settings-request-timeout", "upstream.userAgent": "settings-user-agent",
-        "auth.strategy": "settings-strategy", "auth.rpm": "settings-account-rpm", "auth.autoRelogin": "settings-auto-relogin",
+        "auth.strategy": "settings-strategy", "auth.rpm": "settings-account-rpm", "auth.autoRelogin": "settings-auto-relogin", "auth.creditCooldownThreshold": "settings-credit-cooldown-threshold",
         "checkin.enable": "settings-checkin-enable", "checkin.path": "settings-checkin-path", "checkin.at": "settings-checkin-at", "checkin.timezone": "settings-checkin-timezone",
         "cache.accountsSeconds": "settings-cache-accountsSeconds", "cache.modelsSeconds": "settings-cache-modelsSeconds", "cache.creditsSeconds": "settings-cache-creditsSeconds",
         "redemption.enable": "redemption-auto-enable", "redemption.at": "redemption-auto-at", "redemption.code": "redemption-auto-code",
@@ -95,7 +96,7 @@
         baseURL: $("#settings-base-url").value.trim(), openAIBaseURL: $("#settings-openai-url").value.trim(),
         loginPath: $("#settings-login-path").value.trim(), loginTimeout: $("#settings-login-timeout").value.trim(),
         requestTimeout: $("#settings-request-timeout").value.trim(), userAgent: $("#settings-user-agent").value.trim(),
-      }, auth: { strategy: $("#settings-strategy").value, rpm: Number($("#settings-account-rpm").value), autoRelogin: $("#settings-auto-relogin").checked }, checkin: {
+      }, auth: { strategy: $("#settings-strategy").value, rpm: Number($("#settings-account-rpm").value), autoRelogin: $("#settings-auto-relogin").checked, creditCooldownThreshold: Number($("#settings-credit-cooldown-threshold").value) }, checkin: {
         enable: $("#settings-checkin-enable").checked, path: $("#settings-checkin-path").value.trim(),
         at: $("#settings-checkin-at").value, timezone: $("#settings-checkin-timezone").value.trim(),
       }, redemption: {

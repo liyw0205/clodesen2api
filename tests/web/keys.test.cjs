@@ -146,6 +146,8 @@ test("settings conflicts preserve local edits and reload concurrent changes befo
     baseline = await (await context.request.get(base + "/admin/api/config")).json();
     const ttl = baseline.cache.accountsSeconds + 30;
     await page.locator("#settings-cache-accountsSeconds").fill(String(ttl));
+    const threshold = baseline.auth.creditCooldownThreshold + 25;
+    await page.locator("#settings-credit-cooldown-threshold").fill(String(threshold));
     await page.locator("#settings-server-addr").fill("127.0.0.1:7791");
     const foreign = structuredClone(baseline);
     foreign.auth.rpm = 17; foreign.upstream.userAgent = "concurrent-editor";
@@ -153,15 +155,17 @@ test("settings conflicts preserve local edits and reload concurrent changes befo
     await page.locator("#settings-save").click();
     await page.waitForFunction(() => document.querySelector("#settings-error").textContent.includes("保留") && !document.querySelector("#settings-save").disabled);
     assert.equal(await page.locator("#settings-cache-accountsSeconds").inputValue(), String(ttl));
+    assert.equal(await page.locator("#settings-credit-cooldown-threshold").inputValue(), String(threshold));
     assert.equal(await page.locator("#settings-server-addr").inputValue(), "127.0.0.1:7791");
     assert.equal(await page.locator("#settings-account-rpm").inputValue(), "17");
     assert.equal(await page.locator("#settings-user-agent").inputValue(), "concurrent-editor");
-    assert.match(await page.locator("#settings-preview").textContent(), /待保存 2 项/);
+    assert.match(await page.locator("#settings-preview").textContent(), /待保存 3 项/);
     assert.equal((await (await context.request.get(base + "/admin/api/config")).json()).cache.accountsSeconds, baseline.cache.accountsSeconds);
     await page.locator("#settings-save").click();
     await page.waitForFunction(() => document.querySelector("#settings-preview").hidden && !document.querySelector("#settings-save").disabled);
     const saved = await (await context.request.get(base + "/admin/api/config")).json();
     assert.equal(saved.cache.accountsSeconds, ttl); assert.equal(saved.auth.rpm, 17); assert.equal(saved.upstream.userAgent, "concurrent-editor");
+    assert.equal(saved.auth.creditCooldownThreshold, threshold);
   } finally {
     if (baseline) {
       const current = await (await context.request.get(base + "/admin/api/config")).json();
@@ -606,23 +610,33 @@ test("model call estimates use per-account request pricing, effective mappings a
   } finally { await context.close(); }
 });
 
-test("settings groups preview restart impact and persist resource TTLs and backup schedule", async () => {
+test("settings groups preview impact and persist cooldown threshold, resource TTLs and backup schedule", async () => {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); const page = await context.newPage();
   page.on("pageerror", error => failures.push(error.message));
   await page.route("**/admin/api/update**", route => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
   await page.goto(base + "/admin/?view=settings"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click();
   await page.waitForFunction(() => document.querySelector("#settings-cache-accountsSeconds").value !== "");
   assert.equal(await page.locator("#operations-panel").isHidden(), true);
+  assert.equal(await page.locator("#settings-credit-cooldown-threshold").inputValue(), "100");
+  await page.locator("#settings-credit-cooldown-threshold").fill("0");
+  assert.equal(await page.locator("#settings-credit-cooldown-threshold").evaluate(input => input.checkValidity()), false);
+  await page.locator("#settings-credit-cooldown-threshold").fill("200");
   await page.locator("#settings-cache-accountsSeconds").fill("60");
   await page.locator("#settings-cache-modelsSeconds").fill("7200");
   await page.locator("#settings-cache-creditsSeconds").fill("900");
   await page.locator("#settings-server-addr").fill("127.0.0.1:7789");
-  await page.waitForFunction(() => document.querySelector("#settings-preview").textContent.includes("待保存 4 项"));
+  await page.waitForFunction(() => document.querySelector("#settings-preview").textContent.includes("待保存 5 项"));
   const preview = await page.locator("#settings-preview").textContent(); assert.match(preview, /保存后生效/); assert.match(preview, /重启后生效/);
+  assert.match(preview, /积分冷却阈值 · 保存后生效/);
   await page.locator("#settings-save").click();
   await page.waitForFunction(() => document.querySelector("#settings-preview").hidden && !document.querySelector("#settings-pending").hidden);
   const cache = await (await context.request.get(base + "/admin/api/cache-status")).json();
   assert.equal(cache.accounts.ttlSeconds, 60); assert.equal(cache.models.ttlSeconds, 7200); assert.equal(cache.credits.ttlSeconds, 900);
+  const settings = await (await context.request.get(base + "/admin/api/config")).json();
+  assert.equal(settings.auth.creditCooldownThreshold, 200);
+  assert.equal(settings.fields["auth.creditCooldownThreshold"].mode, "hot");
+  assert.equal(settings.fields["auth.creditCooldownThreshold"].effective, 200);
+  assert.equal(settings.fields["auth.creditCooldownThreshold"].pending, false);
   await page.locator("#settings-group-storage").click();
   await page.waitForFunction(() => document.querySelector("#backup-schedule-retain").value !== "");
   await page.locator("#backup-schedule-enabled").check(); await page.locator("#backup-schedule-at").fill("03:15"); await page.locator("#backup-schedule-retain").fill("5");
@@ -634,8 +648,12 @@ test("settings groups preview restart impact and persist resource TTLs and backu
   await page.locator("#backup-schedule-enabled").uncheck(); await page.locator("#backup-schedule-form").getByRole("button", { name: "保存备份计划" }).click();
   await page.waitForFunction(() => document.querySelector("#backup-schedule-status").textContent.includes("已关闭"));
   await page.locator("#settings-group-general").click();
+  assert.equal(await page.locator("#settings-credit-cooldown-threshold").inputValue(), "200");
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 844 }); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.locator("#settings-credit-cooldown-threshold").scrollIntoViewIfNeeded();
+    const bounds = await page.locator("#settings-credit-cooldown-threshold").boundingBox();
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
     await page.screenshot({ path: "test-results/settings-groups-" + width + ".png", fullPage: true });
   }
   await context.close();

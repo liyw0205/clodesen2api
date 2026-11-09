@@ -44,24 +44,25 @@ type Upstream struct {
 	accountID   string
 	enabled     bool
 
-	accounts             []*Upstream
-	owner                *Upstream
-	poolMode             bool
-	strategy             string
-	rpmLimit             int
-	rpmInFlight          map[string]int
-	fixedAccount         *Upstream
-	poolMu               sync.Mutex
-	creditCheckMu        sync.Mutex
-	nextAccount          int
-	cooldownUntil        map[*Upstream]time.Time
-	cooldownReason       map[*Upstream]string
-	accountStateRecorder func(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error
-	modelCooldowns       *modelcooldown.Store
-	creditMu             sync.RWMutex
-	creditRecorder       func(CreditUsageRecord)
-	creditPricing        map[string]int64
-	redemptionRecorder   func(string, RedemptionResult)
+	accounts                []*Upstream
+	owner                   *Upstream
+	poolMode                bool
+	strategy                string
+	rpmLimit                int
+	creditCooldownThreshold int64
+	rpmInFlight             map[string]int
+	fixedAccount            *Upstream
+	poolMu                  sync.Mutex
+	creditCheckMu           sync.Mutex
+	nextAccount             int
+	cooldownUntil           map[*Upstream]time.Time
+	cooldownReason          map[*Upstream]string
+	accountStateRecorder    func(accountID string, enabled bool, cooldownUntil *time.Time, cooldownReason string) error
+	modelCooldowns          *modelcooldown.Store
+	creditMu                sync.RWMutex
+	creditRecorder          func(CreditUsageRecord)
+	creditPricing           map[string]int64
+	redemptionRecorder      func(string, RedemptionResult)
 }
 
 // RequestAccountSetter is optionally implemented by the response writer to
@@ -181,12 +182,13 @@ func NewWithAccounts(cfg *config.Config, credentials []AccountCredential) (*Upst
 
 	pool := &Upstream{
 		cfg: cfg, poolMode: true,
-		strategy:       strategy,
-		rpmLimit:       rpmLimit,
-		rpmInFlight:    make(map[string]int),
-		cooldownUntil:  make(map[*Upstream]time.Time),
-		cooldownReason: make(map[*Upstream]string),
-		creditPricing:  make(map[string]int64),
+		strategy:                strategy,
+		rpmLimit:                rpmLimit,
+		creditCooldownThreshold: configuredCreditCooldownThreshold(cfg.Auth.CreditCooldownThreshold),
+		rpmInFlight:             make(map[string]int),
+		cooldownUntil:           make(map[*Upstream]time.Time),
+		cooldownReason:          make(map[*Upstream]string),
+		creditPricing:           make(map[string]int64),
 	}
 	for _, credential := range credentials {
 		credential.Identifier = strings.TrimSpace(credential.Identifier)
@@ -229,12 +231,13 @@ func (u *Upstream) ApplyRuntimeConfig(cfg *config.Config) {
 		return
 	}
 	strategy := config.NormalizeStrategy(cfg.Auth.Strategy)
+	u.poolMu.Lock()
 	if strategy != "" {
-		u.poolMu.Lock()
 		u.strategy = strategy
 		u.rpmLimit = configuredRPM(cfg.Auth.RPM)
-		u.poolMu.Unlock()
 	}
+	u.creditCooldownThreshold = configuredCreditCooldownThreshold(cfg.Auth.CreditCooldownThreshold)
+	u.poolMu.Unlock()
 }
 
 // SetCreditUsageRecorder receives successful model requests as local,
@@ -351,26 +354,28 @@ func newSession(cfg *config.Config) (*Upstream, error) {
 	mainTimeout := cfg.Upstream.RequestTimeout
 	if mainTimeout > 0 {
 		return &Upstream{
-			cfg:            cfg,
-			enabled:        true,
-			cooldownUntil:  make(map[*Upstream]time.Time),
-			cooldownReason: make(map[*Upstream]string),
-			rpmLimit:       configuredRPM(cfg.Auth.RPM),
-			rpmInFlight:    make(map[string]int),
-			httpClient:     &http.Client{Transport: transport, Jar: jar, Timeout: mainTimeout},
-			loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
+			cfg:                     cfg,
+			enabled:                 true,
+			cooldownUntil:           make(map[*Upstream]time.Time),
+			cooldownReason:          make(map[*Upstream]string),
+			rpmLimit:                configuredRPM(cfg.Auth.RPM),
+			creditCooldownThreshold: configuredCreditCooldownThreshold(cfg.Auth.CreditCooldownThreshold),
+			rpmInFlight:             make(map[string]int),
+			httpClient:              &http.Client{Transport: transport, Jar: jar, Timeout: mainTimeout},
+			loginClient:             &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 		}, nil
 	}
 	// request_timeout=0 表示不限超时（流式）
 	return &Upstream{
-		cfg:            cfg,
-		enabled:        true,
-		cooldownUntil:  make(map[*Upstream]time.Time),
-		cooldownReason: make(map[*Upstream]string),
-		rpmLimit:       configuredRPM(cfg.Auth.RPM),
-		rpmInFlight:    make(map[string]int),
-		httpClient:     &http.Client{Transport: transport, Jar: jar},
-		loginClient:    &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
+		cfg:                     cfg,
+		enabled:                 true,
+		cooldownUntil:           make(map[*Upstream]time.Time),
+		cooldownReason:          make(map[*Upstream]string),
+		rpmLimit:                configuredRPM(cfg.Auth.RPM),
+		creditCooldownThreshold: configuredCreditCooldownThreshold(cfg.Auth.CreditCooldownThreshold),
+		rpmInFlight:             make(map[string]int),
+		httpClient:              &http.Client{Transport: transport, Jar: jar},
+		loginClient:             &http.Client{Transport: transport, Jar: jar, Timeout: cfg.Upstream.LoginTimeout},
 	}, nil
 }
 
@@ -911,6 +916,13 @@ func configuredRPM(limit int) int {
 	return limit
 }
 
+func configuredCreditCooldownThreshold(threshold int64) int64 {
+	if threshold < 1 {
+		return insufficientCreditsThreshold
+	}
+	return threshold
+}
+
 func (u *Upstream) accountIndexLocked(account *Upstream) int {
 	for index, candidate := range u.accounts {
 		if candidate == account {
@@ -1144,7 +1156,10 @@ func (u *Upstream) refreshCreditBalance(ctx context.Context) {
 
 func (u *Upstream) applyCreditBalance(balance int64) {
 	owner := u.restrictionOwner()
-	if balance > insufficientCreditsThreshold {
+	owner.poolMu.Lock()
+	threshold := configuredCreditCooldownThreshold(owner.creditCooldownThreshold)
+	owner.poolMu.Unlock()
+	if balance > threshold {
 		owner.clearCreditCooldown(u)
 	} else {
 		owner.coolDown(u)

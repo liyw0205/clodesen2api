@@ -26,7 +26,7 @@ type FieldState struct {
 var settingNames = map[string]string{
 	"addr": "server.addr", "base-url": "upstream.baseURL", "openai-base-url": "upstream.openAIBaseURL",
 	"login-path": "upstream.loginPath", "login-timeout": "upstream.loginTimeout", "request-timeout": "upstream.requestTimeout", "user-agent": "upstream.userAgent",
-	"strategy": "auth.strategy", "account-rpm": "auth.rpm", "auto-relogin": "auth.autoRelogin",
+	"strategy": "auth.strategy", "account-rpm": "auth.rpm", "auto-relogin": "auth.autoRelogin", "credit-cooldown-threshold": "auth.creditCooldownThreshold",
 	"api-keys-file": "api.keysFile", "api-allow-no-auth": "api.allowNoAuth", "api-trusted-proxies": "api.trustedProxies",
 	"checkin": "checkin.enable", "checkin-path": "checkin.path", "checkin-at": "checkin.at", "checkin-tz": "checkin.timezone",
 	"auto-redeem": "redemption.enable", "auto-redeem-at": "redemption.at", "auto-redeem-code": "redemption.code",
@@ -87,7 +87,7 @@ func (c *Config) captureSources(fs *flag.FlagSet, args []string, lookup func(str
 
 func hotSetting(path string) bool {
 	switch path {
-	case "auth.strategy", "auth.rpm", "checkin.enable", "checkin.at", "redemption.enable", "redemption.at", "redemption.code", "update.source", "update.customPrefix", "cache.accountsSeconds", "cache.modelsSeconds", "cache.creditsSeconds":
+	case "auth.strategy", "auth.rpm", "auth.creditCooldownThreshold", "checkin.enable", "checkin.at", "redemption.enable", "redemption.at", "redemption.code", "update.source", "update.customPrefix", "cache.accountsSeconds", "cache.modelsSeconds", "cache.creditsSeconds":
 		return true
 	}
 	return false

@@ -35,12 +35,13 @@ type Config struct {
 		UserAgent      string
 	}
 	Auth struct {
-		Identifier  string
-		Password    string
-		Accounts    string
-		Strategy    string
-		RPM         int
-		AutoRelogin bool
+		Identifier              string
+		Password                string
+		Accounts                string
+		Strategy                string
+		RPM                     int
+		AutoRelogin             bool
+		CreditCooldownThreshold int64
 	}
 	Admin struct {
 		Token        string
@@ -87,9 +88,10 @@ type PublicSettings struct {
 		UserAgent      string `json:"userAgent"`
 	} `json:"upstream"`
 	Auth struct {
-		Strategy    string `json:"strategy"`
-		RPM         int    `json:"rpm"`
-		AutoRelogin bool   `json:"autoRelogin"`
+		Strategy                string `json:"strategy"`
+		RPM                     int    `json:"rpm"`
+		AutoRelogin             bool   `json:"autoRelogin"`
+		CreditCooldownThreshold int64  `json:"creditCooldownThreshold"`
 	} `json:"auth"`
 	API struct {
 		KeysFile       string `json:"keysFile"`
@@ -139,6 +141,7 @@ func Load() *Config {
 	flag.StringConfigVar(&c.Auth.Strategy, "strategy", "auth", "strategy", "fixed", "账号选择策略：fixed、round_robin 或 random")
 	flag.IntConfigVar(&c.Auth.RPM, "account-rpm", "auth", "rpm", 4, "每个账号允许同时处理的请求数")
 	flag.BoolConfigVar(&c.Auth.AutoRelogin, "auto-relogin", "auth", "auto_relogin", true, "401 时是否自动重新登录")
+	flag.Int64ConfigVar(&c.Auth.CreditCooldownThreshold, "credit-cooldown-threshold", "auth", "credit_cooldown_threshold", 100, "积分低于等于此值时自动冷却账号")
 	flag.StringConfigVar(&c.Admin.Token, "admin-token", "admin", "token", "", "管理后台访问令牌（首次设置为 6-20 个字符）")
 	flag.StringConfigVar(&c.Admin.TokenFile, "admin-token-file", "admin", "token_file", "data/admin.token", "管理后台令牌持久化文件")
 	flag.StringConfigVar(&c.Admin.AccountsFile, "admin-accounts-file", "admin", "accounts_file", "data/accounts.json", "管理后台账号与策略存储文件")
@@ -186,6 +189,10 @@ func (c *Config) PublicSettings() PublicSettings {
 	out.Upstream.BaseURL, out.Upstream.OpenAIBaseURL, out.Upstream.LoginPath = c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath
 	out.Upstream.LoginTimeout, out.Upstream.RequestTimeout, out.Upstream.UserAgent = c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent
 	out.Auth.Strategy, out.Auth.RPM, out.Auth.AutoRelogin = c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin
+	out.Auth.CreditCooldownThreshold = c.Auth.CreditCooldownThreshold
+	if out.Auth.CreditCooldownThreshold < 1 {
+		out.Auth.CreditCooldownThreshold = 100
+	}
 	if out.Auth.RPM <= 0 {
 		out.Auth.RPM = 4
 	}
@@ -227,6 +234,9 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	}
 	if rpm < 1 || rpm > 1000 {
 		return errors.New("每账号并发上限必须在 1 到 1000 之间")
+	}
+	if settings.Auth.CreditCooldownThreshold < 1 || settings.Auth.CreditCooldownThreshold > 1000000000000 {
+		return errors.New("积分冷却阈值必须在 1 到 1000000000000 之间")
 	}
 	loginTimeout, err := time.ParseDuration(strings.TrimSpace(settings.Upstream.LoginTimeout))
 	if err != nil || loginTimeout <= 0 {
@@ -314,6 +324,7 @@ func (c *Config) ApplyPublicSettings(settings PublicSettings) error {
 	c.Upstream.OpenAIBaseURL = strings.TrimRight(strings.TrimSpace(settings.Upstream.OpenAIBaseURL), "/")
 	c.Upstream.LoginPath, c.Upstream.LoginTimeout, c.Upstream.RequestTimeout, c.Upstream.UserAgent = strings.TrimSpace(settings.Upstream.LoginPath), loginTimeout, requestTimeout, strings.TrimSpace(settings.Upstream.UserAgent)
 	c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin = strategy, rpm, settings.Auth.AutoRelogin
+	c.Auth.CreditCooldownThreshold = settings.Auth.CreditCooldownThreshold
 	c.API.KeysFile, c.API.AllowNoAuth, c.API.TrustedProxies = strings.TrimSpace(apiSettings.KeysFile), apiSettings.AllowNoAuth, strings.TrimSpace(apiSettings.TrustedProxies)
 	c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone = settings.Checkin.Enable, strings.TrimSpace(settings.Checkin.Path), strings.TrimSpace(settings.Checkin.At), strings.TrimSpace(settings.Checkin.Timezone)
 	c.Redemption.Enable, c.Redemption.At = settings.Redemption.Enable, redemptionAt
@@ -392,6 +403,7 @@ accounts = %q
 strategy = %q
 rpm = %d
 auto_relogin = %t
+credit_cooldown_threshold = %d
 
 [admin]
 token = %q
@@ -425,7 +437,7 @@ models_seconds = %d
 credits_seconds = %d
 `, c.Server.Addr, c.Upstream.BaseURL, c.Upstream.OpenAIBaseURL, c.Upstream.LoginPath,
 		c.Upstream.LoginTimeout.String(), c.Upstream.RequestTimeout.String(), c.Upstream.UserAgent,
-		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin,
+		c.Auth.Identifier, c.Auth.Password, c.Auth.Accounts, c.Auth.Strategy, c.Auth.RPM, c.Auth.AutoRelogin, c.PublicSettings().Auth.CreditCooldownThreshold,
 		c.Admin.Token, c.Admin.TokenFile, c.Admin.AccountsFile, c.API.Key, c.API.KeysFile, c.API.AllowNoAuth, c.API.TrustedProxies,
 		c.Checkin.Enable, c.Checkin.Path, c.Checkin.At, c.Checkin.Timezone,
 		c.Redemption.Enable, c.Redemption.At, c.Redemption.Code,
@@ -475,6 +487,7 @@ accounts = ""
 strategy = "fixed"
 rpm = 4
 auto_relogin = true
+credit_cooldown_threshold = 100
 [admin]
 token = ""
 token_file = "data/admin.token"

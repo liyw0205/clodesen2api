@@ -37,7 +37,7 @@
     const pending = element("p", "field-note"); pending.id = "settings-pending"; pending.hidden = true;
     form.querySelector(".settings-actions").prepend(pending, preview);
     const fields = {
-      "server.addr": "settings-server-addr", "upstream.baseURL": "settings-base-url", "upstream.openAIBaseURL": "settings-openai-url", "upstream.loginPath": "settings-login-path", "upstream.loginTimeout": "settings-login-timeout", "upstream.requestTimeout": "settings-request-timeout", "upstream.userAgent": "settings-user-agent", "auth.strategy": "settings-strategy", "auth.rpm": "settings-account-rpm", "auth.autoRelogin": "settings-auto-relogin", "checkin.enable": "settings-checkin-enable", "checkin.path": "settings-checkin-path", "checkin.at": "settings-checkin-at", "checkin.timezone": "settings-checkin-timezone", "cache.accountsSeconds": "settings-cache-accountsSeconds", "cache.modelsSeconds": "settings-cache-modelsSeconds", "cache.creditsSeconds": "settings-cache-creditsSeconds"
+      "server.addr": "settings-server-addr", "upstream.baseURL": "settings-base-url", "upstream.openAIBaseURL": "settings-openai-url", "upstream.loginPath": "settings-login-path", "upstream.loginTimeout": "settings-login-timeout", "upstream.requestTimeout": "settings-request-timeout", "upstream.userAgent": "settings-user-agent", "auth.strategy": "settings-strategy", "auth.rpm": "settings-account-rpm", "auth.autoRelogin": "settings-auto-relogin", "auth.creditCooldownThreshold": "settings-credit-cooldown-threshold", "checkin.enable": "settings-checkin-enable", "checkin.path": "settings-checkin-path", "checkin.at": "settings-checkin-at", "checkin.timezone": "settings-checkin-timezone", "cache.accountsSeconds": "settings-cache-accountsSeconds", "cache.modelsSeconds": "settings-cache-modelsSeconds", "cache.creditsSeconds": "settings-cache-creditsSeconds"
     };
     function changes() {
       preview.replaceChildren(); if (!baseline) { preview.hidden = true; return; }
@@ -48,7 +48,7 @@
         if (value === baseline[group]?.[name]) continue;
         const field = baseline.fields?.[path], parent = input.closest("label");
         const label = input.type === "checkbox" ? parent.querySelector("span:not(.setting-source)").textContent : Array.from(parent.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join("").trim();
-        const mode = field?.mode || (path.startsWith("cache.") || ["auth.rpm", "auth.strategy", "checkin.enable", "checkin.at"].includes(path) ? "hot" : "restart");
+        const mode = field?.mode || (path.startsWith("cache.") || ["auth.rpm", "auth.strategy", "auth.creditCooldownThreshold", "checkin.enable", "checkin.at"].includes(path) ? "hot" : "restart");
         list.append(element("li", "", label + " · " + (mode === "hot" ? "保存后生效" : "重启后生效")));
       }
       preview.hidden = !list.children.length;

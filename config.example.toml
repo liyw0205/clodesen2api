@@ -27,6 +27,8 @@ accounts = ""
 strategy = "fixed"
 # 每个账号同时处理中的模型请求上限（默认 4）
 rpm = 4
+# 积分小于等于此值时自动冷却账号，大于此值时恢复可用（可在管理后台修改）
+credit_cooldown_threshold = 100
 # 单账号兼容配置；accounts 非空时忽略以下两项
 identifier = ""
 password = ""

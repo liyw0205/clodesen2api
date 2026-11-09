@@ -99,6 +99,8 @@ Responses 原样转发 JSON 参数，上游与模型需支持该协议；与其�
 
 strategy 仅支持 fixed、round_robin、random。新请求传入已移除的策略或账号 weight 字段返回 400。历史配置与备份中的 weighted、least_inflight、latency 在读取时转换为 fixed，旧 weight 字段忽略，后续保存时清除；策略不扩大计量重试预算。
 
+GET/PUT `/config` 的 `auth.creditCooldownThreshold` 为账号积分冷却阈值，默认 100，接受 1 到 1000000000000 的整数。PUT 仍需提供完整公开设置及当前 revision。该字段支持热更新，保存后无需重启，下一次余额复查按新阈值判断：余额小于等于阈值时冷却，大于阈值时恢复。`fields["auth.creditCooldownThreshold"]` 提供来源、锁定和生效元数据；命令行或环境变量覆盖时管理页面不可修改。
+
 告警默认关闭，每 30 秒检查本地状态。余额仅使用仍有效且所有启用账号余额均已知的缓存；未知状态不视为恢复。任务异常按各任务类型最近一个已结束任务判断，后续成功任务可以恢复。支持自定义 Webhook、Bark、Server 酱、PushPlus、Telegram、企业微信机器人、钉钉机器人、飞书机器人、SMTP、ntfy、WxPusher、Gotify 和 PushDeer。GET `/alerts` 返回 `definitions`（每渠道字段类型、必填和选项）、`settings.channels`、`configured`、当前条件及投递队列。凭据字段不会回传明文；`configured[channel][field]` 表示凭据已保存。PUT 请求示例：`{revision,settings:{lowBalance,channels:{webhook:{enabled:true,config:{url:"https://example.test/hook"}},ntfy:{enabled:false,config:{url:"https://ntfy.example.test",topic:"ops"}}}},clearSecrets:[]}`。`settings.channels` 中提交的渠道会更新，未提交的渠道保持不变；空凭据保留原值，`clearSecrets` 用 `渠道ID.字段名` 显式清除凭据，如 `["webhook.url"]`。清除必填凭据前须同时关闭对应渠道。旧版单 Webhook 配置会自动迁移；`settings.enabled` 汇总各渠道启用状态。
 
 POST `/alerts/test` 使用相同 revision 校验，格式为 `{revision,channel,config,clearSecrets?}`，按已保存凭据与草稿合并后发送一条测试消息，但不保存草稿或变更 revision。验证失败返回 400，revision 冲突返回 409，渠道发送失败返回 502。持久化告警队列跨实例认领，通知请求超时 5 秒且不跟随重定向；稳定的 `Idempotency-Key` 供接收方去重。进程崩溃窗口仍可能重复投递，接收端应按事件 ID 去重。失败退避 1/2/4/8/16 分钟，最多 10 次；队列最多 100 条，溢出与重试耗尽在面板显示。

@@ -92,3 +92,46 @@ func TestPublicSettingsDefaultRPMAndFixedStrategyPersistence(t *testing.T) {
 		t.Fatalf("saved settings omitted fixed strategy or RPM: %s", data)
 	}
 }
+
+func TestCreditCooldownThresholdValidationAndPersistence(t *testing.T) {
+	_, cfg := settingsFixture(t)
+	settings := cfg.PublicSettings()
+	if settings.Auth.CreditCooldownThreshold != 100 {
+		t.Fatalf("default threshold = %d, want 100", settings.Auth.CreditCooldownThreshold)
+	}
+	for _, threshold := range []int64{1, 200, 1000000000000} {
+		settings.Auth.CreditCooldownThreshold = threshold
+		if err := cfg.ApplyPublicSettings(settings); err != nil {
+			t.Fatalf("threshold %d: %v", threshold, err)
+		}
+		if cfg.Auth.CreditCooldownThreshold != threshold {
+			t.Fatalf("applied threshold = %d, want %d", cfg.Auth.CreditCooldownThreshold, threshold)
+		}
+	}
+	for _, threshold := range []int64{0, -1, 1000000000001} {
+		settings.Auth.CreditCooldownThreshold = threshold
+		if err := cfg.ApplyPublicSettings(settings); err == nil {
+			t.Fatalf("invalid threshold %d accepted", threshold)
+		}
+		if cfg.Auth.CreditCooldownThreshold != 1000000000000 {
+			t.Fatal("invalid threshold changed config")
+		}
+	}
+	for _, threshold := range []int64{0, 200} {
+		cfg.Auth.CreditCooldownThreshold = threshold
+		if err := cfg.Save(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(cfg.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "credit_cooldown_threshold = 100"
+		if threshold == 200 {
+			want = "credit_cooldown_threshold = 200"
+		}
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("saved config omitted threshold: want %q", want)
+		}
+	}
+}
