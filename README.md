@@ -39,6 +39,8 @@ curl -b admin-cookie -X POST http://127.0.0.1:6687/admin/api/keys \
 
 The response contains `secret` once. Production stores only its SHA-256 hash in `data/control.sqlite3`; legacy `data/api-keys.json` is imported once and preserved. Use the secret as `Authorization: Bearer <secret>` or `X-API-Key: <secret>`.
 
+The API Keys page shows a copyable Base URL and generates curl, Python and client JSON configurations for Chat, Responses, text-to-image and multipart image editing. Copying supports browsers where the Clipboard API is unavailable or denied.
+
 Managed keys support enable/disable, expiration (`expiresAt`), CIDR allowlists (`ipAllow`), per-key sliding-window RPM (`rpm`), and exact model allowlists (`models`). Updates and rotations require the current `version`; rotation invalidates the previous secret. The management endpoints are `GET/POST /admin/api/keys`, `PUT/DELETE /admin/api/keys/{id}`, and `POST /admin/api/keys/{id}/rotate`.
 
 `limits` supports `maxConcurrent`, `dailyRequests`, `monthlyRequests`, `dailyTokens`, `monthlyTokens`, `dailyCredits`, and `monthlyCredits`; zero means no limit. Request quotas count admitted inference requests, including upstream failures, once per client request. `/v1/models` requires authentication but does not consume inference RPM or request quotas. Counters and leases are shared by instances using the same local database; they do not provide distributed multi-host coordination.
@@ -66,6 +68,8 @@ Settings can create/download a full backup, validate an uploaded archive, and re
 Batch checkin, redemption, refresh and connection probes run as bounded persistent jobs. The task center restores progress across page reloads, shows each account result, and supports cancellation and safe retries. Uncertain redemption results are not automatically retried. A connection probe checks login and model listing rather than paid inference.
 
 The panel includes a persistent desktop sidebar and a mobile navigation drawer, account search/filter/sort and batch enable/disable, URL-restored navigation, one-time key connection templates, request diagnostics, grouped settings with restart impact, runtime health, and persistent login backoff. `/readyz` checks local readiness; `/healthz` checks HTTP liveness. Routing supports fixed, round-robin and random selection with the existing retry and metering limits. Routing and update-source selectors use floating panels that stay inside the viewport.
+
+Model names show conversation, text-to-image and image-to-image types on desktop and mobile. Type resolution prefers the endpoint capabilities set in model policies, then upstream metadata, then local mappings for known model names. Unknown types remain visible as unknown; use the model policy editor to specify endpoint capabilities. Connection templates and per-model playground actions use the same resolution, including upstream mappings and public aliases.
 
 Time reports support today, 7 days and 30 days, grouping by date/model/account/key, P95 and CSV export. Compact metrics retain 31 days independently of the seven-day detail limit; the panel marks incomplete history before the upgrade rather than presenting old detail as continuous metrics. Credit estimates retain their separate seven-day scope and cannot be attributed to keys.
 

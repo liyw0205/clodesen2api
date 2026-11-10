@@ -72,7 +72,7 @@ type accountResponse struct {
 func (u *Upstream) ListPricing(ctx context.Context) (defaultCredits *int64, models []ModelPricing, err error) {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return nil, nil, errors.New("no upstream account configured")
 		}
 		accounts = []*Upstream{u}
@@ -115,7 +115,7 @@ func (u *Upstream) ListCreditUsageWithFailures(ctx context.Context) ([]CreditUsa
 	accounts := u.accountsSnapshot()
 	direct := len(accounts) == 0
 	if direct {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return nil, nil, errors.New("no upstream account configured")
 		}
 		accounts = []*Upstream{u}

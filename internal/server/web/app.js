@@ -460,8 +460,8 @@
   const connections = window.createConnections({ api, element, showToast });
   const playground = window.createPlayground({ element, onUnauthorized: () => setLogin(true, false, false), onComplete: () => { void accounts.refresh(false, true, true); }, getModels: () => state.models.filter(model => modelPolicies.rule(model.id)?.enabled !== false).map(model => {
     const rule = modelPolicies.rule(model.id);
-    return { id: rule?.publicId || model.id, endpoints: rule?.endpoints };
-  }) });
+    return { id: rule?.publicId || model.id, ...window.modelTypes.resolve(model, state.models, modelPolicies.rule) };
+  }).filter(model => model.enabled) });
   const routingTools = window.createRoutingTools({ element, onChange: strategy => accounts.updateStrategy(strategy) });
   const reports = window.createReports({ api, element, formatTime });
   const notifications = window.createNotifications({ api, element, formatTime });

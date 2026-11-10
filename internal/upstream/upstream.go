@@ -458,7 +458,7 @@ func (u *Upstream) Login(ctx context.Context) error {
 		}
 		return errors.Join(loginErrors...)
 	}
-	if u.poolMode && (strings.TrimSpace(u.cfg.Auth.Identifier) == "" || strings.TrimSpace(u.cfg.Auth.Password) == "") {
+	if u.poolMode {
 		return errors.New("未配置上游账号")
 	}
 
@@ -1806,7 +1806,7 @@ func (u *Upstream) Checkin(ctx context.Context) (CheckinResult, error) {
 func (u *Upstream) CheckinAccount(ctx context.Context, accountID string) (CheckinResult, error) {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return CheckinResult{}, errors.New("未配置上游账号")
 		}
 		if accountID != "" && accountID != u.accountID {

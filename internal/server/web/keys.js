@@ -220,6 +220,12 @@
     }
     $("#keys-refresh").addEventListener("click", load);
     $("#keys-create").addEventListener("click", () => openEditor());
+    $("#keys-base-url").textContent = location.origin + "/v1";
+    $("#keys-base-copy").addEventListener("click", async () => {
+      errorNotice("#keys-copy-error", "");
+      try { await window.copyText(location.origin + "/v1"); showToast("Base URL 已复制"); }
+      catch (_) { errorNotice("#keys-copy-error", "自动复制失败，请手动复制上方地址。"); }
+    });
     $("#key-form").addEventListener("submit", save);
     $("#key-confirm-submit").addEventListener("click", execute);
     secretDialog.addEventListener("close", () => { $("#key-secret").value = ""; });
@@ -227,8 +233,11 @@
     secretDialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => { $("#key-secret").value = ""; }));
     $("#key-copy").addEventListener("click", async () => {
       const current = generation;
-      try { await navigator.clipboard.writeText($("#key-secret").value); if (current === generation && secretDialog.open) showToast("密钥已复制"); }
-      catch (_) { if (current === generation && secretDialog.open) { $("#key-secret").select(); errorNotice("#key-copy-error", "自动复制失败，请复制已选中的密钥。"); } }
+      const target = $("#key-secret"), value = target.value;
+      const isCurrent = () => current === generation && secretDialog.open && target.value === value;
+      errorNotice("#key-copy-error", "");
+      try { await window.copyText(value, { target, isCurrent }); if (isCurrent()) showToast("密钥已复制"); }
+      catch (_) { if (isCurrent()) { target.focus(); target.select(); errorNotice("#key-copy-error", "自动复制失败，请复制已选中的密钥。"); } }
     });
     return { load, clear };
   };

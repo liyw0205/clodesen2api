@@ -934,7 +934,7 @@ test("connection templates keep one-time secrets only until close or logout", as
   await page.locator("#connection-format").selectOption("python");
   assert.match(await page.locator("#connection-output").inputValue(), /from openai import OpenAI/);
   await page.locator("#connection-format").selectOption("client");
-  assert.deepEqual(JSON.parse(await page.locator("#connection-output").inputValue()), { base_url: base + "/v1", api_key: secret, model: "allowed-model" });
+  assert.deepEqual(JSON.parse(await page.locator("#connection-output").inputValue()), { base_url: base + "/v1", api_key: secret, model: "allowed-model", endpoint: "/v1/chat/completions" });
   for (const width of [1440, 768, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
@@ -956,6 +956,133 @@ test("connection templates keep one-time secrets only until close or logout", as
   await page.locator("#dashboard").waitFor({ state: "visible" });
   await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
   await context.close();
+});
+
+test("Base URL, generated keys and connection templates reach the real clipboard with modern and fallback copying", async () => {
+  for (const mode of ["modern", "missing", "denied"]) {
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ["clipboard-read", "clipboard-write"] });
+    const page = await context.newPage();
+    page.on("pageerror", error => failures.push(error.message));
+    await page.addInitScript(mode => {
+      const clipboard = navigator.clipboard;
+      window.readClipboard = () => clipboard.readText();
+      if (mode !== "modern") Object.defineProperty(navigator, "clipboard", { value: mode === "missing" ? undefined : { writeText: async () => { throw new Error("denied"); } } });
+    }, mode);
+    await page.route("**/admin/api/update**", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+    let key;
+    try {
+      await page.goto(base + "/admin/?view=keys");
+      await page.locator("#admin-token").fill("test-admin-123");
+      await page.locator("#login-submit").click();
+      await page.locator("#keys-base-copy").click();
+      await page.waitForFunction(() => document.querySelector("#toast").textContent === "Base URL 已复制");
+      assert.equal(await page.locator("#keys-base-url").textContent(), base + "/v1");
+      assert.equal(await page.evaluate(() => window.readClipboard()), base + "/v1", mode);
+      await page.locator("#keys-create").click();
+      await page.locator("#key-name").fill("clipboard-" + mode);
+      await page.locator("#key-save").click();
+      await page.locator("#key-secret-dialog").waitFor({ state: "visible" });
+      const secret = await page.locator("#key-secret").inputValue();
+      key = (await (await context.request.get(base + "/admin/api/keys")).json()).keys.find(item => item.name === "clipboard-" + mode);
+      await page.locator("#key-copy").click();
+      await page.waitForFunction(() => document.querySelector("#toast").textContent === "密钥已复制");
+      assert.equal(await page.evaluate(() => window.readClipboard()), secret, mode + " inside modal");
+      assert.equal(await page.locator("#key-copy-error").isVisible(), false);
+      await page.locator("#key-connect").click();
+      await page.waitForFunction(() => document.querySelector("#connection-model").value === "allowed-model");
+      await page.locator("#connection-copy").click();
+      await page.waitForFunction(() => document.querySelector("#toast").textContent === "接入配置已复制");
+      assert.equal(await page.evaluate(() => window.readClipboard()), await page.locator("#connection-output").inputValue());
+      assert.equal(await page.locator(".clipboard-buffer").count(), 0);
+      await page.keyboard.press("Escape");
+      assert.equal(await page.locator("#key-secret").inputValue(), "");
+      assert.equal(await page.locator("#connection-output").inputValue(), "");
+      mkdirSync("test-results", { recursive: true });
+      if (mode === "missing") for (const width of [1440, 768, 390, 320]) {
+        await page.setViewportSize({ width, height: 844 });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+        assert.equal(await page.locator(".api-base").evaluate(node => [...node.querySelectorAll("button, code")].some(item => item.scrollWidth > item.clientWidth + 1)), false);
+        await page.screenshot({ path: "test-results/keys-base-url-" + width + ".png", fullPage: true });
+      }
+    } finally {
+      if (key) await context.request.delete(base + "/admin/api/keys/" + key.id + "?version=" + key.version);
+      await context.close();
+    }
+  }
+});
+
+test("model types guide connection endpoints and playground modes across desktop and mobile", async () => {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const page = await context.newPage();
+  page.on("pageerror", error => failures.push(error.message));
+  const catalog = [
+    { id: "gpt-image-2" }, { id: "custom-painter", type: "text_to_image" },
+    { id: "retouch", supported_endpoints: ["/v1/images/edits"] },
+    { id: "qwen-vl", input_modalities: ["image", "text"], output_modalities: ["text"] },
+    { id: "mapped-source", type: "chat" }, { id: "unlisted" },
+  ];
+  const policies = catalog.map(model => ({ sourceId: model.id, publicId: model.id === "mapped-source" ? "studio" : model.id, upstreamId: model.id === "mapped-source" ? "retouch" : model.id, enabled: true, endpoints: model.id === "retouch" ? ["/v1/images/edits"] : [] }));
+  await page.route("**/admin/api/models", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: catalog }) }));
+  await page.route("**/admin/api/model-policies", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ revision: 1, models: policies }) }));
+  await page.route("**/admin/api/update**", route => route.fulfill({ contentType: "application/json", body: JSON.stringify({ currentVersion: "test", sources: [] }) }));
+  try {
+    await page.goto(base + "/admin/?view=analytics");
+    await page.locator("#admin-token").fill("test-admin-123");
+    await page.locator("#login-submit").click();
+    await page.waitForFunction(() => document.querySelectorAll("#model-rows tr").length === 6);
+    const expected = ["文生图 / 图生图", "文生图", "图生图", "对话", "图生图", "类型未知"];
+    assert.deepEqual(await page.locator("#model-rows .model-types").allTextContents(), expected);
+    assert.deepEqual(await page.locator("#model-cards .model-types").allTextContents(), expected);
+    await page.locator("#model-rows tr").first().getByRole("button", { name: "测试", exact: true }).click();
+    assert.equal(await page.locator("#playground-mode-image").isChecked(), true);
+    await page.keyboard.press("Escape");
+    mkdirSync("test-results", { recursive: true });
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      await page.screenshot({ path: "test-results/model-types-" + width + ".png", fullPage: true });
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await selectView(page, "keys-tab");
+    await page.locator("#connections-open").click();
+    await page.waitForFunction(() => document.querySelector("#connection-model").value === "gpt-image-2");
+    assert.equal(await page.locator("#connection-endpoint").inputValue(), "image");
+    assert.match(await page.locator("#connection-output").inputValue(), /\/v1\/images\/generations/);
+    assert.equal(await page.locator("#connection-endpoint option[value=chat]").evaluate(node => node.disabled), true);
+    await page.locator("#connection-endpoint").selectOption("edit");
+    let output = await page.locator("#connection-output").inputValue();
+    assert.match(output, /\/v1\/images\/edits/);
+    assert.match(output, /-F 'image\[\]=@input.png'/);
+    assert.equal(output.includes("application/json"), false);
+    await page.locator("#connection-format").selectOption("python");
+    output = await page.locator("#connection-output").inputValue();
+    assert.match(output, /with open\("input.png", "rb"\) as image:/);
+    assert.match(output, /client.images.edit\(/);
+    await page.locator("#connection-model").selectOption("studio");
+    assert.equal(await page.locator("#connection-endpoint").inputValue(), "edit");
+    assert.match(await page.locator("#connection-output").inputValue(), /model="studio"/);
+    await page.locator("#connection-model").selectOption("custom-painter");
+    assert.equal(await page.locator("#connection-endpoint").inputValue(), "image");
+    assert.match(await page.locator("#connection-output").inputValue(), /client.images.generate\(/);
+    await page.locator("#connection-model").selectOption("qwen-vl");
+    assert.equal(await page.locator("#connection-endpoint").inputValue(), "chat");
+    await page.locator("#connection-endpoint").selectOption("responses");
+    assert.match(await page.locator("#connection-output").inputValue(), /client.responses.create\(/);
+    await page.locator("#connection-format").selectOption("curl");
+    output = await page.locator("#connection-output").inputValue();
+    assert.match(output, /\/v1\/responses/);
+    assert.deepEqual(JSON.parse(output.slice(output.indexOf("-d '") + 4, -1)), { model: "qwen-vl", input: "你好" });
+    await page.locator("#connection-format").selectOption("client");
+    assert.equal(JSON.parse(await page.locator("#connection-output").inputValue()).endpoint, "/v1/responses");
+    await page.locator("#connection-model").selectOption("unlisted");
+    assert.equal(await page.locator("#connection-endpoint option:disabled").count(), 0, "unknown types retain manual endpoint selection");
+    for (const width of [1440, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      assert.equal(await page.locator("#connection-dialog").evaluate(node => node.scrollWidth > node.clientWidth + 1), false);
+      await page.screenshot({ path: "test-results/connection-types-" + width + ".png" });
+    }
+    assert.deepEqual(failures, []);
+  } finally { await context.close(); }
 });
 
 test("shared admission settings, request quota and background account actions", async () => {
@@ -1242,7 +1369,10 @@ test("key lifecycle, policy, audit, conflict and responsive UI", async () => {
 
 test("key expiry, IP, clipboard failure, logout and late secret response", async () => {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  await context.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => { throw new Error("denied"); } } }));
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => { throw new Error("denied"); } } });
+    document.execCommand = () => false;
+  });
   const page = await context.newPage();
   await page.route("**/admin/api/update**", route => route.fulfill({ contentType:"application/json",body:JSON.stringify({currentVersion:"test",sources:[]}) }));
   await page.goto(base + "/admin/"); await page.locator("#admin-token").fill("test-admin-123"); await page.locator("#login-submit").click(); await page.locator("#dashboard").waitFor({state:"visible"});

@@ -112,7 +112,14 @@
         const row = element("tr");
         const identity = element("td", "model-id");
         const policy = modelPolicies.rule(id);
+        const capability = window.modelTypes.resolve(model, models, modelPolicies.rule);
+        function typeLabel() {
+          const label = element("div", "model-types", capability.types.join(" / ") || (capability.known ? "无可用接口" : "类型未知"));
+          label.title = capability.source + "；可在编辑策略中设置接口能力";
+          return label;
+        }
         identity.append(element("strong", "", policy?.publicId || id));
+        identity.append(typeLabel());
         if (policy && (policy.publicId !== id || policy.upstreamId !== id)) identity.append(element("div", "field-note", id + " → " + policy.upstreamId));
         row.append(identity);
         if (pricedModels) {
@@ -124,7 +131,7 @@
         function controls() {
           const wrap = modelPolicies.controls(id), test = element("button", "row-action", "测试");
           test.type = "button";
-          test.disabled = !route.enabled;
+          test.disabled = !route.enabled || !capability.enabled;
           test.addEventListener("click", () => openPlayground(policy?.publicId || id));
           const testAction = element("span", "model-test-action");
           testAction.append(test);
@@ -141,6 +148,7 @@
 
         const card = element("article", "model-card");
         card.append(element("strong", "model-card-id", policy?.publicId || id));
+        card.append(typeLabel());
         if (policy && (policy.publicId !== id || policy.upstreamId !== id)) card.append(element("div", "field-note", id + " → " + policy.upstreamId));
         const details = element("div", "model-card-details");
         if (credits) details.append(element("span", "model-credits", credits));

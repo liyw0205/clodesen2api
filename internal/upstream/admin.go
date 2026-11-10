@@ -49,7 +49,7 @@ type RedemptionResult struct {
 func (u *Upstream) RedeemCodeAll(ctx context.Context, code string) []RedemptionResult {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return nil
 		}
 		accounts = []*Upstream{u}
@@ -73,6 +73,9 @@ func (u *Upstream) redeemOwnCode(ctx context.Context, code string) RedemptionRes
 func (u *Upstream) AccountCredentials() []AccountCredential {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
+		if u.poolMode {
+			return nil
+		}
 		return []AccountCredential{{
 			ID:         accountIDFor(u.cfg.Auth.Identifier),
 			Identifier: u.cfg.Auth.Identifier,
@@ -229,7 +232,7 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 	accounts := u.accountsSnapshot()
 	direct := len(accounts) == 0
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return nil
 		}
 		accounts = []*Upstream{u}
@@ -280,7 +283,7 @@ func (u *Upstream) AccountStatuses(ctx context.Context) []AccountStatus {
 func (u *Upstream) RefreshAccountStatus(ctx context.Context, accountID string) (AccountStatus, error) {
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return AccountStatus{}, errors.New("未配置上游账号")
 		}
 		if accountID != "" && accountID != u.accountID {
@@ -367,7 +370,7 @@ func (u *Upstream) redeemCodeForAccount(ctx context.Context, accountID, code str
 	code = strings.TrimSpace(code)
 	accounts := u.accountsSnapshot()
 	if len(accounts) == 0 {
-		if strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
+		if u.poolMode || strings.TrimSpace(u.cfg.Auth.Identifier) == "" {
 			return RedemptionResult{AccountID: accountID, Status: "error", Message: "未配置上游账号"}
 		}
 		accounts = []*Upstream{u}
